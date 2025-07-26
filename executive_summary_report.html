@@ -1,0 +1,311 @@
+
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Executive Investment Summary</title>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        <style>
+            * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }
+            
+            body {
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                color: #2C3E50;
+                background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+                min-height: 100vh;
+            }
+            
+            .container {
+                max-width: 1600px;
+                margin: 0 auto;
+                padding: 20px;
+            }
+            
+            .executive-header {
+                background: rgba(255, 255, 255, 0.98);
+                padding: 50px;
+                text-align: center;
+                margin-bottom: 30px;
+                border-radius: 25px;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+                backdrop-filter: blur(20px);
+                border: 1px solid rgba(255,255,255,0.2);
+            }
+            
+            .executive-header h1 {
+                font-size: 3.5em;
+                margin-bottom: 20px;
+                font-weight: 200;
+                background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+                -webkit-background-clip: text;
+                -webkit-text-fill-color: transparent;
+                background-clip: text;
+            }
+            
+            .executive-header .subtitle {
+                font-size: 1.5em;
+                color: #34495e;
+                margin-bottom: 15px;
+                font-weight: 300;
+            }
+            
+            .executive-header .meta {
+                font-size: 1.1em;
+                color: #7f8c8d;
+                margin-top: 20px;
+            }
+            
+            .key-stats {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 20px;
+                margin-bottom: 40px;
+            }
+            
+            .stat-card {
+                background: rgba(255, 255, 255, 0.95);
+                padding: 30px;
+                border-radius: 20px;
+                text-align: center;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255,255,255,0.2);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+            
+            .stat-card:hover {
+                transform: translateY(-8px);
+                box-shadow: 0 20px 50px rgba(0,0,0,0.15);
+            }
+            
+            .stat-card .value {
+                font-size: 2.8em;
+                font-weight: 600;
+                color: #1e3c72;
+                margin-bottom: 10px;
+            }
+            
+            .stat-card .label {
+                font-size: 1.1em;
+                color: #7f8c8d;
+                text-transform: uppercase;
+                letter-spacing: 1px;
+            }
+            
+            .chart-section {
+                background: rgba(255, 255, 255, 0.95);
+                margin-bottom: 30px;
+                border-radius: 25px;
+                box-shadow: 0 15px 35px rgba(0,0,0,0.1);
+                overflow: hidden;
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255,255,255,0.2);
+                transition: transform 0.3s ease;
+            }
+            
+            .chart-section:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 25px 50px rgba(0,0,0,0.15);
+            }
+            
+            .section-title {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 25px 40px;
+                font-size: 1.6em;
+                font-weight: 300;
+                margin: 0;
+                text-align: center;
+            }
+            
+            .recommendation-box {
+                background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+                color: white;
+                padding: 40px;
+                border-radius: 25px;
+                margin: 40px 0;
+                text-align: center;
+                box-shadow: 0 20px 60px rgba(0,0,0,0.1);
+            }
+            
+            .recommendation-box h2 {
+                font-size: 2.2em;
+                margin-bottom: 20px;
+                font-weight: 300;
+            }
+            
+            .recommendation-box p {
+                font-size: 1.3em;
+                line-height: 1.8;
+                margin-bottom: 15px;
+            }
+            
+            .action-items {
+                background: rgba(255, 255, 255, 0.95);
+                padding: 40px;
+                border-radius: 25px;
+                margin: 30px 0;
+                backdrop-filter: blur(10px);
+                border: 1px solid rgba(255,255,255,0.2);
+            }
+            
+            .action-items h3 {
+                color: #2c3e50;
+                font-size: 1.6em;
+                margin-bottom: 25px;
+                text-align: center;
+            }
+            
+            .action-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+                gap: 25px;
+            }
+            
+            .action-item {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 25px;
+                border-radius: 15px;
+                box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            }
+            
+            .action-item h4 {
+                font-size: 1.2em;
+                margin-bottom: 10px;
+                font-weight: 500;
+            }
+            
+            .action-item p {
+                opacity: 0.9;
+                line-height: 1.6;
+            }
+            
+            @media (max-width: 768px) {
+                .executive-header h1 {
+                    font-size: 2.5em;
+                }
+                
+                .key-stats {
+                    grid-template-columns: 1fr;
+                }
+                
+                .action-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="executive-header">
+                <h1>Executive Investment Summary</h1>
+                <div class="subtitle">Medical Aesthetic Clinic Acquisition</div>
+                <div class="meta">
+                    <strong>Investment Opportunity:</strong> $2.02M Equity Value | <strong>Target IRR:</strong> 24.2%<br>
+                    <strong>Prepared:</strong> July 26, 2025 | <strong>Confidential</strong>
+                </div>
+            </div>
+            
+            <div class="key-stats">
+                <div class="stat-card">
+                    <div class="value">$2.02M</div>
+                    <div class="label">Equity Valuation</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">22.7%</div>
+                    <div class="label">EBITDA Margin</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">4.3x</div>
+                    <div class="label">EV/EBITDA</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">2.0x</div>
+                    <div class="label">Franchise Ratio</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">24.2%</div>
+                    <div class="label">Base Case IRR</div>
+                </div>
+                <div class="stat-card">
+                    <div class="value">2.8x</div>
+                    <div class="label">Money Multiple</div>
+                </div>
+            </div>
+            
+            <div class="chart-section">
+                <h2 class="section-title">📊 Key Performance Indicators</h2>
+                <html>
+<head><meta charset="utf-8" /></head>
+<body>
+    <div>                            <div id="kpi-dashboard" class="plotly-graph-div" style="height:700px; width:100%;"></div>            <script type="text/javascript">                window.PLOTLYENV=window.PLOTLYENV || {};                                if (document.getElementById("kpi-dashboard")) {                    Plotly.newPlot(                        "kpi-dashboard",                        [{"gauge":{"axis":{"range":[0,4]},"bar":{"color":"#1f77b4"},"steps":[{"color":"lightgray","range":[0,1.5]},{"color":"lightgreen","range":[1.5,2.5]},{"color":"green","range":[2.5,4]}],"threshold":{"line":{"color":"red","width":4},"thickness":0.75,"value":3.0}},"mode":"gauge+number","title":{"text":"Equity Value ($M)"},"value":2.02,"type":"indicator","domain":{"x":[0.0,0.2888888888888889],"y":[0.625,1.0]}},{"gauge":{"axis":{"range":[0,35]},"bar":{"color":"#ff7f0e"},"steps":[{"color":"lightgray","range":[0,15]},{"color":"lightgreen","range":[15,25]},{"color":"green","range":[25,35]}]},"mode":"gauge+number","title":{"text":"EBITDA Margin (%)"},"value":22.7,"type":"indicator","domain":{"x":[0.35555555555555557,0.6444444444444445],"y":[0.625,1.0]}},{"gauge":{"axis":{"range":[0,2]},"bar":{"color":"#2ca02c"},"steps":[{"color":"lightgray","range":[0,0.8]},{"color":"lightgreen","range":[0.8,1.2]},{"color":"yellow","range":[1.2,2]}]},"mode":"gauge+number","title":{"text":"EV\u002fRevenue (x)"},"value":1.0,"type":"indicator","domain":{"x":[0.7111111111111111,1.0],"y":[0.625,1.0]}},{"gauge":{"axis":{"range":[0,3]},"bar":{"color":"#d62728"},"steps":[{"color":"lightgray","range":[0,1]},{"color":"yellow","range":[1,1.5]},{"color":"lightgreen","range":[1.5,3]}]},"mode":"gauge+number","title":{"text":"Franchise Ratio (x)"},"value":2.0,"type":"indicator","domain":{"x":[0.0,0.2888888888888889],"y":[0.0,0.375]}},{"gauge":{"axis":{"range":[8,20]},"bar":{"color":"#9467bd"},"steps":[{"color":"green","range":[8,12]},{"color":"lightgreen","range":[12,16]},{"color":"lightgray","range":[16,20]}]},"mode":"gauge+number","title":{"text":"WACC (%)"},"value":14.6,"type":"indicator","domain":{"x":[0.35555555555555557,0.6444444444444445],"y":[0.0,0.375]}},{"gauge":{"axis":{"range":[0,30]},"bar":{"color":"#17becf"},"steps":[{"color":"lightgray","range":[0,10]},{"color":"lightgreen","range":[10,20]},{"color":"green","range":[20,30]}]},"mode":"gauge+number","title":{"text":"EBIT Margin (%)"},"value":18.7,"type":"indicator","domain":{"x":[0.7111111111111111,1.0],"y":[0.0,0.375]}}],                        {"template":{"data":{"histogram2dcontour":[{"type":"histogram2dcontour","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"choropleth":[{"type":"choropleth","colorbar":{"outlinewidth":0,"ticks":""}}],"histogram2d":[{"type":"histogram2d","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"heatmap":[{"type":"heatmap","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"contourcarpet":[{"type":"contourcarpet","colorbar":{"outlinewidth":0,"ticks":""}}],"contour":[{"type":"contour","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"surface":[{"type":"surface","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"mesh3d":[{"type":"mesh3d","colorbar":{"outlinewidth":0,"ticks":""}}],"scatter":[{"fillpattern":{"fillmode":"overlay","size":10,"solidity":0.2},"type":"scatter"}],"parcoords":[{"type":"parcoords","line":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterpolargl":[{"type":"scatterpolargl","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"bar":[{"error_x":{"color":"#2a3f5f"},"error_y":{"color":"#2a3f5f"},"marker":{"line":{"color":"#E5ECF6","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"scattergeo":[{"type":"scattergeo","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterpolar":[{"type":"scatterpolar","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"scattergl":[{"type":"scattergl","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatter3d":[{"type":"scatter3d","line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattermap":[{"type":"scattermap","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattermapbox":[{"type":"scattermapbox","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterternary":[{"type":"scatterternary","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattercarpet":[{"type":"scattercarpet","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"carpet":[{"aaxis":{"endlinecolor":"#2a3f5f","gridcolor":"white","linecolor":"white","minorgridcolor":"white","startlinecolor":"#2a3f5f"},"baxis":{"endlinecolor":"#2a3f5f","gridcolor":"white","linecolor":"white","minorgridcolor":"white","startlinecolor":"#2a3f5f"},"type":"carpet"}],"table":[{"cells":{"fill":{"color":"#EBF0F8"},"line":{"color":"white"}},"header":{"fill":{"color":"#C8D4E3"},"line":{"color":"white"}},"type":"table"}],"barpolar":[{"marker":{"line":{"color":"#E5ECF6","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"pie":[{"automargin":true,"type":"pie"}]},"layout":{"autotypenumbers":"strict","colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#2a3f5f"},"hovermode":"closest","hoverlabel":{"align":"left"},"paper_bgcolor":"white","plot_bgcolor":"#E5ECF6","polar":{"bgcolor":"#E5ECF6","angularaxis":{"gridcolor":"white","linecolor":"white","ticks":""},"radialaxis":{"gridcolor":"white","linecolor":"white","ticks":""}},"ternary":{"bgcolor":"#E5ECF6","aaxis":{"gridcolor":"white","linecolor":"white","ticks":""},"baxis":{"gridcolor":"white","linecolor":"white","ticks":""},"caxis":{"gridcolor":"white","linecolor":"white","ticks":""}},"coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]]},"xaxis":{"gridcolor":"white","linecolor":"white","ticks":"","title":{"standoff":15},"zerolinecolor":"white","automargin":true,"zerolinewidth":2},"yaxis":{"gridcolor":"white","linecolor":"white","ticks":"","title":{"standoff":15},"zerolinecolor":"white","automargin":true,"zerolinewidth":2},"scene":{"xaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2},"yaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2},"zaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2}},"shapedefaults":{"line":{"color":"#2a3f5f"}},"annotationdefaults":{"arrowcolor":"#2a3f5f","arrowhead":0,"arrowwidth":1},"geo":{"bgcolor":"white","landcolor":"#E5ECF6","subunitcolor":"white","showland":true,"showlakes":true,"lakecolor":"white"},"title":{"x":0.05},"mapbox":{"style":"light"}}},"annotations":[{"font":{"size":16},"showarrow":false,"text":"Valuation","x":0.14444444444444446,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"EBITDA Margin","x":0.5,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"Revenue Multiple","x":0.8555555555555556,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"Franchise Ratio","x":0.14444444444444446,"xanchor":"center","xref":"paper","y":0.375,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"WACC","x":0.5,"xanchor":"center","xref":"paper","y":0.375,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"ROI Potential","x":0.8555555555555556,"xanchor":"center","xref":"paper","y":0.375,"yanchor":"bottom","yref":"paper"}],"title":{"font":{"size":20,"family":"Arial","color":"#2E4057"},"text":"\u003cb\u003eExecutive KPI Dashboard\u003c\u002fb\u003e\u003cbr\u003e\u003cspan style=\"font-size:14px\"\u003eMedical Aesthetic Clinic - Key Performance Indicators\u003c\u002fspan\u003e","x":0.5},"font":{"family":"Arial","size":12},"height":700,"plot_bgcolor":"white","paper_bgcolor":"white"},                        {"responsive": true}                    )                };            </script>        </div>
+</body>
+</html>
+            </div>
+            
+            <div class="chart-section">
+                <h2 class="section-title">📈 Investment Analysis</h2>
+                <html>
+<head><meta charset="utf-8" /></head>
+<body>
+    <div>                            <div id="investment-summary" class="plotly-graph-div" style="height:800px; width:100%;"></div>            <script type="text/javascript">                window.PLOTLYENV=window.PLOTLYENV || {};                                if (document.getElementById("investment-summary")) {                    Plotly.newPlot(                        "investment-summary",                        [{"marker":{"color":["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd"]},"name":"Investment Score","showlegend":false,"text":["8.2\u002f10","8.8\u002f10","7.5\u002f10","8.0\u002f10","8.5\u002f10"],"textposition":"outside","x":["Market Position","Financial Health","Growth Potential","Management","Competitive Moat"],"y":[8.2,8.8,7.5,8.0,8.5],"type":"bar","xaxis":"x","yaxis":"y"},{"line":{"color":"#1f77b4","width":3},"marker":{"size":8},"mode":"lines+markers","name":"Revenue ($M)","x":[2023,2024,2025,2026,2027],"y":[1.8,2.04,2.3,2.6,2.9],"type":"scatter","xaxis":"x2","yaxis":"y2"},{"line":{"color":"#ff7f0e","width":3},"marker":{"size":8},"mode":"lines+markers","name":"EBITDA ($M)","x":[2023,2024,2025,2026,2027],"y":[0.38,0.46,0.58,0.7,0.85],"yaxis":"y2","type":"scatter","xaxis":"x2"},{"marker":{"color":["#ff9999","#66b3ff","#99ff99"]},"name":"Valuation","showlegend":false,"text":["$1.0M","$2.0M","$2.4M"],"textposition":"outside","x":["Asset Value","EPV Model","Market Comps"],"y":[0.98,2.02,2.4],"type":"bar","xaxis":"x3","yaxis":"y3"},{"marker":{"color":["#ff6b6b","#feca57","#48ca87","#feca57"]},"name":"Risk Level","showlegend":false,"text":["6.5","4.2","3.8","5.1"],"textposition":"outside","x":["Market Risk","Operational Risk","Financial Risk","Regulatory Risk"],"y":[6.5,4.2,3.8,5.1],"type":"bar","xaxis":"x4","yaxis":"y4"}],                        {"template":{"data":{"histogram2dcontour":[{"type":"histogram2dcontour","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"choropleth":[{"type":"choropleth","colorbar":{"outlinewidth":0,"ticks":""}}],"histogram2d":[{"type":"histogram2d","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"heatmap":[{"type":"heatmap","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"contourcarpet":[{"type":"contourcarpet","colorbar":{"outlinewidth":0,"ticks":""}}],"contour":[{"type":"contour","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"surface":[{"type":"surface","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"mesh3d":[{"type":"mesh3d","colorbar":{"outlinewidth":0,"ticks":""}}],"scatter":[{"fillpattern":{"fillmode":"overlay","size":10,"solidity":0.2},"type":"scatter"}],"parcoords":[{"type":"parcoords","line":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterpolargl":[{"type":"scatterpolargl","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"bar":[{"error_x":{"color":"#2a3f5f"},"error_y":{"color":"#2a3f5f"},"marker":{"line":{"color":"#E5ECF6","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"scattergeo":[{"type":"scattergeo","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterpolar":[{"type":"scatterpolar","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"scattergl":[{"type":"scattergl","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatter3d":[{"type":"scatter3d","line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattermap":[{"type":"scattermap","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattermapbox":[{"type":"scattermapbox","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterternary":[{"type":"scatterternary","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattercarpet":[{"type":"scattercarpet","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"carpet":[{"aaxis":{"endlinecolor":"#2a3f5f","gridcolor":"white","linecolor":"white","minorgridcolor":"white","startlinecolor":"#2a3f5f"},"baxis":{"endlinecolor":"#2a3f5f","gridcolor":"white","linecolor":"white","minorgridcolor":"white","startlinecolor":"#2a3f5f"},"type":"carpet"}],"table":[{"cells":{"fill":{"color":"#EBF0F8"},"line":{"color":"white"}},"header":{"fill":{"color":"#C8D4E3"},"line":{"color":"white"}},"type":"table"}],"barpolar":[{"marker":{"line":{"color":"#E5ECF6","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"pie":[{"automargin":true,"type":"pie"}]},"layout":{"autotypenumbers":"strict","colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#2a3f5f"},"hovermode":"closest","hoverlabel":{"align":"left"},"paper_bgcolor":"white","plot_bgcolor":"#E5ECF6","polar":{"bgcolor":"#E5ECF6","angularaxis":{"gridcolor":"white","linecolor":"white","ticks":""},"radialaxis":{"gridcolor":"white","linecolor":"white","ticks":""}},"ternary":{"bgcolor":"#E5ECF6","aaxis":{"gridcolor":"white","linecolor":"white","ticks":""},"baxis":{"gridcolor":"white","linecolor":"white","ticks":""},"caxis":{"gridcolor":"white","linecolor":"white","ticks":""}},"coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]]},"xaxis":{"gridcolor":"white","linecolor":"white","ticks":"","title":{"standoff":15},"zerolinecolor":"white","automargin":true,"zerolinewidth":2},"yaxis":{"gridcolor":"white","linecolor":"white","ticks":"","title":{"standoff":15},"zerolinecolor":"white","automargin":true,"zerolinewidth":2},"scene":{"xaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2},"yaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2},"zaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2}},"shapedefaults":{"line":{"color":"#2a3f5f"}},"annotationdefaults":{"arrowcolor":"#2a3f5f","arrowhead":0,"arrowwidth":1},"geo":{"bgcolor":"white","landcolor":"#E5ECF6","subunitcolor":"white","showland":true,"showlakes":true,"lakecolor":"white"},"title":{"x":0.05},"mapbox":{"style":"light"}}},"xaxis":{"anchor":"y","domain":[0.0,0.45]},"yaxis":{"anchor":"x","domain":[0.625,1.0],"title":{"text":"Score (1-10)"},"range":[0,10]},"xaxis2":{"anchor":"y2","domain":[0.55,1.0]},"yaxis2":{"anchor":"x2","domain":[0.625,1.0],"title":{"text":"Revenue ($M)"}},"xaxis3":{"anchor":"y3","domain":[0.0,0.45]},"yaxis3":{"anchor":"x3","domain":[0.0,0.375],"title":{"text":"Valuation ($M)"}},"xaxis4":{"anchor":"y4","domain":[0.55,1.0]},"yaxis4":{"anchor":"x4","domain":[0.0,0.375],"title":{"text":"Risk Level (1-10)"},"range":[0,8]},"annotations":[{"font":{"size":16},"showarrow":false,"text":"Investment Highlights","x":0.225,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"Financial Performance","x":0.775,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"Valuation Summary","x":0.225,"xanchor":"center","xref":"paper","y":0.375,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"Risk Assessment","x":0.775,"xanchor":"center","xref":"paper","y":0.375,"yanchor":"bottom","yref":"paper"}],"title":{"font":{"size":20,"family":"Arial","color":"#2E4057"},"text":"\u003cb\u003eInvestment Summary Dashboard\u003c\u002fb\u003e\u003cbr\u003e\u003cspan style=\"font-size:14px\"\u003eComprehensive Deal Overview\u003c\u002fspan\u003e","x":0.5},"font":{"family":"Arial","size":11},"height":800,"plot_bgcolor":"white","paper_bgcolor":"white"},                        {"responsive": true}                    )                };            </script>        </div>
+</body>
+</html>
+            </div>
+            
+            <div class="chart-section">
+                <h2 class="section-title">💼 Deal Structure & Returns</h2>
+                <html>
+<head><meta charset="utf-8" /></head>
+<body>
+    <div>                            <div id="deal-structure" class="plotly-graph-div" style="height:500px; width:100%;"></div>            <script type="text/javascript">                window.PLOTLYENV=window.PLOTLYENV || {};                                if (document.getElementById("deal-structure")) {                    Plotly.newPlot(                        "deal-structure",                        [{"hole":0.4,"labels":["Equity Investment","Debt Financing","Seller Financing"],"marker":{"colors":["#1f77b4","#ff7f0e","#2ca02c"]},"name":"Sources","textfont":{"size":10},"textinfo":"label+percent+value","texttemplate":"\u003cb\u003e%{label}\u003c\u002fb\u003e\u003cbr\u003e%{percent}\u003cbr\u003e$%{value:.1f}M","values":[1.2,0.6,0.22],"type":"pie","domain":{"x":[0.0,0.45],"y":[0.0,1.0]}},{"marker":{"color":"#1f77b4"},"name":"IRR (%)","text":["18.5%","24.2%","31.8%"],"textposition":"outside","x":["Bear Case","Base Case","Bull Case"],"y":[18.5,24.2,31.8],"type":"bar","xaxis":"x","yaxis":"y"},{"line":{"color":"#ff7f0e","width":3},"marker":{"size":10},"mode":"lines+markers","name":"Money Multiple","text":["2.1x","2.8x","3.6x"],"textposition":"top center","x":["Bear Case","Base Case","Bull Case"],"y":[2.1,2.8,3.6],"yaxis":"y","type":"scatter","xaxis":"x"}],                        {"template":{"data":{"histogram2dcontour":[{"type":"histogram2dcontour","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"choropleth":[{"type":"choropleth","colorbar":{"outlinewidth":0,"ticks":""}}],"histogram2d":[{"type":"histogram2d","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"heatmap":[{"type":"heatmap","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"contourcarpet":[{"type":"contourcarpet","colorbar":{"outlinewidth":0,"ticks":""}}],"contour":[{"type":"contour","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"surface":[{"type":"surface","colorbar":{"outlinewidth":0,"ticks":""},"colorscale":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]]}],"mesh3d":[{"type":"mesh3d","colorbar":{"outlinewidth":0,"ticks":""}}],"scatter":[{"fillpattern":{"fillmode":"overlay","size":10,"solidity":0.2},"type":"scatter"}],"parcoords":[{"type":"parcoords","line":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterpolargl":[{"type":"scatterpolargl","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"bar":[{"error_x":{"color":"#2a3f5f"},"error_y":{"color":"#2a3f5f"},"marker":{"line":{"color":"#E5ECF6","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"bar"}],"scattergeo":[{"type":"scattergeo","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterpolar":[{"type":"scatterpolar","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"histogram":[{"marker":{"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"histogram"}],"scattergl":[{"type":"scattergl","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatter3d":[{"type":"scatter3d","line":{"colorbar":{"outlinewidth":0,"ticks":""}},"marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattermap":[{"type":"scattermap","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattermapbox":[{"type":"scattermapbox","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scatterternary":[{"type":"scatterternary","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"scattercarpet":[{"type":"scattercarpet","marker":{"colorbar":{"outlinewidth":0,"ticks":""}}}],"carpet":[{"aaxis":{"endlinecolor":"#2a3f5f","gridcolor":"white","linecolor":"white","minorgridcolor":"white","startlinecolor":"#2a3f5f"},"baxis":{"endlinecolor":"#2a3f5f","gridcolor":"white","linecolor":"white","minorgridcolor":"white","startlinecolor":"#2a3f5f"},"type":"carpet"}],"table":[{"cells":{"fill":{"color":"#EBF0F8"},"line":{"color":"white"}},"header":{"fill":{"color":"#C8D4E3"},"line":{"color":"white"}},"type":"table"}],"barpolar":[{"marker":{"line":{"color":"#E5ECF6","width":0.5},"pattern":{"fillmode":"overlay","size":10,"solidity":0.2}},"type":"barpolar"}],"pie":[{"automargin":true,"type":"pie"}]},"layout":{"autotypenumbers":"strict","colorway":["#636efa","#EF553B","#00cc96","#ab63fa","#FFA15A","#19d3f3","#FF6692","#B6E880","#FF97FF","#FECB52"],"font":{"color":"#2a3f5f"},"hovermode":"closest","hoverlabel":{"align":"left"},"paper_bgcolor":"white","plot_bgcolor":"#E5ECF6","polar":{"bgcolor":"#E5ECF6","angularaxis":{"gridcolor":"white","linecolor":"white","ticks":""},"radialaxis":{"gridcolor":"white","linecolor":"white","ticks":""}},"ternary":{"bgcolor":"#E5ECF6","aaxis":{"gridcolor":"white","linecolor":"white","ticks":""},"baxis":{"gridcolor":"white","linecolor":"white","ticks":""},"caxis":{"gridcolor":"white","linecolor":"white","ticks":""}},"coloraxis":{"colorbar":{"outlinewidth":0,"ticks":""}},"colorscale":{"sequential":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"sequentialminus":[[0.0,"#0d0887"],[0.1111111111111111,"#46039f"],[0.2222222222222222,"#7201a8"],[0.3333333333333333,"#9c179e"],[0.4444444444444444,"#bd3786"],[0.5555555555555556,"#d8576b"],[0.6666666666666666,"#ed7953"],[0.7777777777777778,"#fb9f3a"],[0.8888888888888888,"#fdca26"],[1.0,"#f0f921"]],"diverging":[[0,"#8e0152"],[0.1,"#c51b7d"],[0.2,"#de77ae"],[0.3,"#f1b6da"],[0.4,"#fde0ef"],[0.5,"#f7f7f7"],[0.6,"#e6f5d0"],[0.7,"#b8e186"],[0.8,"#7fbc41"],[0.9,"#4d9221"],[1,"#276419"]]},"xaxis":{"gridcolor":"white","linecolor":"white","ticks":"","title":{"standoff":15},"zerolinecolor":"white","automargin":true,"zerolinewidth":2},"yaxis":{"gridcolor":"white","linecolor":"white","ticks":"","title":{"standoff":15},"zerolinecolor":"white","automargin":true,"zerolinewidth":2},"scene":{"xaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2},"yaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2},"zaxis":{"backgroundcolor":"#E5ECF6","gridcolor":"white","linecolor":"white","showbackground":true,"ticks":"","zerolinecolor":"white","gridwidth":2}},"shapedefaults":{"line":{"color":"#2a3f5f"}},"annotationdefaults":{"arrowcolor":"#2a3f5f","arrowhead":0,"arrowwidth":1},"geo":{"bgcolor":"white","landcolor":"#E5ECF6","subunitcolor":"white","showland":true,"showlakes":true,"lakecolor":"white"},"title":{"x":0.05},"mapbox":{"style":"light"}}},"xaxis":{"anchor":"y","domain":[0.55,1.0]},"yaxis":{"anchor":"x","domain":[0.0,1.0],"title":{"text":"IRR (%)"}},"annotations":[{"font":{"size":16},"showarrow":false,"text":"Sources & Uses of Funds","x":0.225,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"},{"font":{"size":16},"showarrow":false,"text":"Projected Returns","x":0.775,"xanchor":"center","xref":"paper","y":1.0,"yanchor":"bottom","yref":"paper"}],"title":{"font":{"size":18,"family":"Arial","color":"#2E4057"},"text":"\u003cb\u003eDeal Structure & Returns\u003c\u002fb\u003e\u003cbr\u003e\u003cspan style=\"font-size:14px\"\u003eInvestment Summary & Projected Outcomes\u003c\u002fspan\u003e","x":0.5},"font":{"family":"Arial","size":12},"height":500,"plot_bgcolor":"white","paper_bgcolor":"white"},                        {"responsive": true}                    )                };            </script>        </div>
+</body>
+</html>
+            </div>
+            
+            <div class="recommendation-box">
+                <h2>🎯 Investment Recommendation</h2>
+                <p><strong>STRONG BUY</strong> - Attractive lower middle market opportunity with sustainable competitive advantages</p>
+                <p>Target demonstrates exceptional unit economics (2.0x franchise ratio) with predictable cash flows in growing aesthetic medicine market</p>
+                <p>Conservative base case projects 24.2% IRR with 2.8x money multiple over 5-year hold period</p>
+            </div>
+            
+            <div class="action-items">
+                <h3>🚀 Next Steps & Action Items</h3>
+                <div class="action-grid">
+                    <div class="action-item">
+                        <h4>Due Diligence</h4>
+                        <p>Complete financial, operational, and legal due diligence within 45 days. Focus on customer retention metrics and regulatory compliance.</p>
+                    </div>
+                    <div class="action-item">
+                        <h4>Financing Structure</h4>
+                        <p>Finalize debt financing at 8.5% cost of debt. Target 60/40 equity/debt structure to optimize returns while maintaining flexibility.</p>
+                    </div>
+                    <div class="action-item">
+                        <h4>Value Creation Plan</h4>
+                        <p>Develop 100-day plan focusing on operational improvements, technology implementation, and geographic expansion opportunities.</p>
+                    </div>
+                    <div class="action-item">
+                        <h4>Risk Mitigation</h4>
+                        <p>Establish key person retention agreements and implement comprehensive insurance coverage for regulatory and operational risks.</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div style="background: rgba(255,255,255,0.95); padding: 30px; border-radius: 20px; text-align: center; margin-top: 40px; backdrop-filter: blur(10px);">
+                <p style="color: #7f8c8d; font-size: 0.95em;">
+                    <strong>CONFIDENTIAL</strong> - This analysis contains proprietary and confidential information. 
+                    Distribution is restricted to authorized investment committee members only.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    

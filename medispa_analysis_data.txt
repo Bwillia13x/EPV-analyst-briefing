@@ -1,0 +1,46 @@
+LUXURY AESTHETICS MEDICAL SPA - FINANCIAL ANALYSIS
+=================================================
+
+BASELINE FINANCIAL DATA (Current Year)
+--------------------------------------
+
+INCOME STATEMENT DATA:
+Revenue: $4200000
+Cost of Goods Sold: $1260000
+Gross Profit: $2940000
+Operating Expenses: $2100000
+EBITDA: $840000
+Depreciation: $180000
+EBIT: $660000
+Interest Expense: $45000
+Taxes: $153750
+Net Income: $461250
+
+BALANCE SHEET DATA:
+Current Assets: $850000
+Fixed Assets: $3200000
+Total Assets: $4050000
+Current Liabilities: $420000
+Long Term Debt: $1500000
+Total Liabilities: $1920000
+Equity: $2130000
+Working Capital: $430000
+
+OPERATIONAL METRICS:
+Active Patients: 3800
+New Patients Per Year: 1350
+Patient Retention Rate: 74%
+Average Visits Per Patient: 1.9
+Customer Acquisition Cost: $385
+Average Service Price (Injectables): $575
+Average Service Price (Lasers): $485
+Average Service Price (Skincare): $295
+Provider Utilization Rate: 78%
+Staff Count: 12 (9 RN, 2 NP, 1 MD)
+
+MARKET POSITION:
+- Premium positioning in high-income demographic
+- 5-year operating history with consistent growth
+- Located in affluent suburb with limited competition
+- Strong reputation and referral network
+- Diverse service mix reducing dependency risk

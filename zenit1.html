@@ -1,0 +1,854 @@
+Here’s a production-ready plan plus a working MVP you can run today. It implements Bruce Greenwald’s Earnings Power Value (EPV) with a clean UI, advanced analytics (sensitivities, Monte Carlo), and flexible accounting adjustments.
+
+Overview
+
+- Core model: Greenwald EPV using normalized operating income, maintenance capex, and after-tax economic earnings; value operations via WACC; add non-operating assets; subtract debt and other claims to reach equity value per share.
+- Easy frontend: Streamlit app with step-by-step panels, toggles, sliders, and auto-filled data from Yahoo Finance.
+- Advanced analytics:
+  - Sensitivity heatmaps across WACC, EBIT margin, maintenance capex factor.
+  - Tornado plot showing factor impacts.
+  - Monte Carlo simulation with percentile outcomes and scenario reports.
+- Accounting adjustments:
+  - Normalized margins (mean/median/trimmed).
+  - Maintenance capex via two methods (Depreciation factor and Sales-based capital intensity).
+  - R&D capitalization (optional).
+  - SG&A capitalization (optional).
+  - Excess cash % control.
+  - Manual adjustments for minority interests, pensions, leases, etc.
+- Data sources: yfinance by default; optional hooks for Financial Modeling Prep or others.
+
+How the EPV works (compact)
+
+- Normalize EBIT: use multi-year historical revenue and margin; let user correct for cycle.
+- Adjust to economic earnings:
+  - Pre-tax operating earnings = Normalized EBIT + Normalized D&A − Maintenance Capex
+  - After-tax EPO (earnings power of operations) = above × (1 − Tax Rate)
+- Value of operations = EPO / WACC
+- Equity value = Value of operations + Excess Cash + Non-operating assets − Debt − Other claims
+- Per share = Equity value / Diluted shares outstanding
+
+Quick start
+
+1) Create a virtual environment and install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+2) Run the app:
+
+```bash
+streamlit run app.py
+```
+
+3) Enter a ticker (e.g., AAPL), review inputs, tweak assumptions, and view valuation, sensitivities, and Monte Carlo.
+
+Files
+
+- app.py — Streamlit app with UI, modeling, analytics, and plotting.
+- requirements.txt — Dependencies.
+
+requirements.txt
+
+```txt
+streamlit==1.33.0
+yfinance==0.2.40
+pandas==2.2.2
+numpy==1.26.4
+altair==5.3.0
+scipy==1.13.0
+```
+
+app.py
+
+```python
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import numpy as np
+import altair as alt
+from dataclasses import dataclass
+from typing import Optional, Dict, Tuple
+
+st.set_page_config(
+    page_title="Greenwald EPV Valuation",
+    page_icon="💹",
+    layout="wide",
+)
+
+# -----------------------------
+# Utilities & Data Fetch
+# -----------------------------
+
+@st.cache_data(show_spinner=False, ttl=60 * 60)
+def fetch_yf_statements(ticker: str) -> Dict[str, pd.DataFrame]:
+    t = yf.Ticker(ticker)
+    info = t.info if hasattr(t, "info") else {}
+    price = np.nan
+    if info and "currentPrice" in info and info["currentPrice"]:
+        price = info["currentPrice"]
+    elif "regularMarketPrice" in info and info["regularMarketPrice"]:
+        price = info["regularMarketPrice"]
+
+    # yfinance returns statements with columns as dates and rows as line items
+    income = t.financials or pd.DataFrame()
+    balance = t.balance_sheet or pd.DataFrame()
+    cashflow = t.cashflow or pd.DataFrame()
+
+    # Make column order ascending (oldest to newest)
+    for df in [income, balance, cashflow]:
+        if not df.empty:
+            df.columns = pd.to_datetime(df.columns)
+            df.sort_index(axis=1, inplace=True)
+
+    shares = np.nan
+    if "sharesOutstanding" in info and info["sharesOutstanding"]:
+        shares = float(info["sharesOutstanding"])
+
+    market_cap = np.nan
+    if "marketCap" in info and info["marketCap"]:
+        market_cap = float(info["marketCap"])
+
+    beta = np.nan
+    if "beta" in info and info["beta"]:
+        beta = float(info["beta"])
+
+    # Debt and cash for quick checks
+    total_debt = np.nan
+    cash_st = np.nan
+    if not balance.empty:
+        # yfinance names vary, try multiple candidates
+        debt_candidates = [
+            "Total Debt",
+            "Short Long Term Debt",
+            "Long Term Debt",
+            "Current Debt",
+            "Short Term Debt",
+        ]
+        cash_candidates = [
+            "Cash",
+            "Cash And Cash Equivalents",
+            "Cash And Cash Equivalents And Short Term Investments",
+        ]
+        total_debt = 0.0
+        for c in debt_candidates:
+            if c in balance.index:
+                total_debt += balance.loc[c].iloc[-1]
+        cash_st = 0.0
+        for c in cash_candidates:
+            if c in balance.index:
+                cash_st = max(cash_st, balance.loc[c].iloc[-1])
+
+    return {
+        "info": info,
+        "price": price,
+        "income": income,
+        "balance": balance,
+        "cashflow": cashflow,
+        "shares": shares,
+        "market_cap": market_cap,
+        "beta": beta,
+        "total_debt": total_debt if not np.isnan(total_debt) else None,
+        "cash": cash_st if not np.isnan(cash_st) else None,
+    }
+
+def get_line(df: pd.DataFrame, names: list[str]) -> Optional[pd.Series]:
+    if df is None or df.empty:
+        return None
+    for name in names:
+        if name in df.index:
+            return df.loc[name]
+    return None
+
+def safe_avg(series: pd.Series, years: int, method: str = "median") -> float:
+    if series is None or series.empty:
+        return np.nan
+    s = series.dropna()
+    if s.empty:
+        return np.nan
+    s = s.tail(years)
+    if method == "mean":
+        return float(s.mean())
+    elif method == "trimmed":
+        if len(s) >= 5:
+            trim = int(len(s) * 0.2)
+            return float(s.sort_values().iloc[trim:-trim].mean())
+        else:
+            return float(s.mean())
+    return float(s.median())
+
+def series_to_yearly(series: pd.Series) -> pd.Series:
+    if series is None or series.empty:
+        return series
+    s = series.copy()
+    s.index = pd.to_datetime(s.index).year
+    s = s.groupby(s.index).last()
+    return s
+
+# -----------------------------
+# EPV Model
+# -----------------------------
+
+@dataclass
+class EPVInputs:
+    years: int
+    margin_method: str
+    normalized_margin: Optional[float]
+    tax_rate: float
+    rf_rate: float
+    mrp: float
+    beta: float
+    cost_of_debt: float
+    use_capm: bool
+    equity_weight: float
+    maintenance_method: str
+    maint_factor: float
+    capital_intensity_years: int
+    excess_cash_pct: float
+    rd_capitalize: bool
+    rd_years: int
+    sga_capitalize: bool
+    sga_years: int
+    other_adjustments: float
+    use_manual_shares: bool
+    manual_shares: Optional[float]
+    use_manual_price: bool
+    manual_price: Optional[float]
+    wacc_override: Optional[float]
+
+@dataclass
+class EPVOutputs:
+    normalized_revenue: float
+    normalized_margin: float
+    normalized_ebit: float
+    normalized_da: float
+    maintenance_capex: float
+    epo_after_tax: float
+    wacc: float
+    value_operations: float
+    cash_adjusted: float
+    non_operating_assets: float
+    debt: float
+    other_adjustments: float
+    equity_value: float
+    shares: float
+    value_per_share: float
+    price: float
+    upside: float
+
+def estimate_maintenance_capex(
+    method: str,
+    income: pd.DataFrame,
+    balance: pd.DataFrame,
+    cashflow: pd.DataFrame,
+    years: int,
+    maint_factor: float,
+    capital_intensity_years: int,
+) -> Tuple[float, float, float]:
+    capex_series = get_line(cashflow, ["Capital Expenditures", "CapitalExpenditures"])
+    da_series = get_line(cashflow, ["Depreciation", "Depreciation And Amortization"])
+    revenue_series = get_line(income, ["Total Revenue", "Revenue", "TotalRevenue"])
+
+    capex = 0.0
+    if capex_series is not None:
+        capex = -safe_avg(series_to_yearly(capex_series), years, method="median")  # capex usually negative
+
+    da = 0.0
+    if da_series is not None:
+        da = abs(safe_avg(series_to_yearly(da_series), years, method="median"))
+
+    if method == "depr_factor":
+        maint = da * maint_factor
+        return float(maint), float(capex), float(da)
+
+    # sales-based capital intensity method
+    ppe_series = get_line(balance, ["Property Plant Equipment Net", "Net Property Plant And Equipment", "Property Plant And Equipment"])
+    if revenue_series is None or ppe_series is None:
+        # fallback to depr_factor if missing data
+        maint = da * maint_factor
+        return float(maint), float(capex), float(da)
+
+    rev_y = series_to_yearly(revenue_series)
+    ppe_y = series_to_yearly(ppe_series)
+    common_years = rev_y.index.intersection(ppe_y.index)
+    rev_y = rev_y.loc[common_years]
+    ppe_y = ppe_y.loc[common_years]
+
+    if rev_y.empty or ppe_y.empty:
+        maint = da * maint_factor
+        return float(maint), float(capex), float(da)
+
+    rev_tail = rev_y.tail(capital_intensity_years)
+    ppe_tail = ppe_y.tail(capital_intensity_years)
+    if rev_tail.empty or ppe_tail.empty or rev_tail.mean() == 0:
+        maint = da * maint_factor
+        return float(maint), float(capex), float(da)
+
+    capital_intensity = float(ppe_tail.mean() / rev_tail.mean())
+
+    # estimate avg revenue growth per year (absolute increment)
+    rev_change = rev_tail.diff().dropna()
+    avg_rev_increase = float(rev_change.mean()) if not rev_change.empty else 0.0
+
+    growth_capex_est = capital_intensity * max(0.0, avg_rev_increase)
+    maint = max(0.0, capex - growth_capex_est)
+    # if capex lower than growth capex estimate, fall back to DA factor modestly
+    if maint <= 0:
+        maint = da * min(1.0, maint_factor)
+
+    return float(maint), float(capex), float(da)
+
+def compute_wacc(
+    rf: float,
+    mrp: float,
+    beta: float,
+    cost_of_debt: float,
+    tax_rate: float,
+    equity_weight: float,
+    wacc_override: Optional[float],
+    use_capm: bool,
+) -> float:
+    if wacc_override is not None and wacc_override > 0:
+        return wacc_override
+    if use_capm:
+        re = rf + beta * mrp
+    else:
+        re = beta  # interpret as direct input if not using CAPM
+    ew = np.clip(equity_weight, 0.0, 1.0)
+    dw = 1.0 - ew
+    rd_after_tax = cost_of_debt * (1.0 - tax_rate)
+    return float(re * ew + rd_after_tax * dw)
+
+def normalized_values(
+    income: pd.DataFrame,
+    cashflow: pd.DataFrame,
+    years: int,
+    margin_method: str,
+    user_margin: Optional[float],
+) -> Tuple[float, float, float, float]:
+    revenue_series = get_line(income, ["Total Revenue", "Revenue", "TotalRevenue"])
+    ebit_series = get_line(income, ["Ebit", "EBIT", "Operating Income", "OperatingIncome"])
+    da_series = get_line(cashflow, ["Depreciation", "Depreciation And Amortization"])
+
+    rev = series_to_yearly(revenue_series) if revenue_series is not None else pd.Series(dtype=float)
+    ebit = series_to_yearly(ebit_series) if ebit_series is not None else pd.Series(dtype=float)
+    da = series_to_yearly(da_series) if da_series is not None else pd.Series(dtype=float)
+
+    norm_rev = float(rev.tail(years).median()) if not rev.empty else np.nan
+
+    if user_margin is not None and user_margin > 0:
+        norm_margin = float(user_margin)
+    else:
+        # compute historical margin
+        margin = pd.Series(dtype=float)
+        if not rev.empty and not ebit.empty:
+            common = rev.index.intersection(ebit.index)
+            if len(common) > 0:
+                margin = ebit.loc[common] / rev.loc[common]
+        if margin_method == "mean":
+            norm_margin = float(margin.tail(years).mean()) if not margin.empty else np.nan
+        elif margin_method == "trimmed":
+            mm = margin.tail(years).dropna()
+            if len(mm) >= 5:
+                t = int(len(mm) * 0.2)
+                norm_margin = float(mm.sort_values().iloc[t:-t].mean())
+            else:
+                norm_margin = float(mm.mean()) if not mm.empty else np.nan
+        else:  # median default
+            norm_margin = float(margin.tail(years).median()) if not margin.empty else np.nan
+
+    norm_ebit = norm_rev * norm_margin if not np.isnan(norm_rev) and not np.isnan(norm_margin) else np.nan
+    norm_da = float(da.tail(years).median()) if not da.empty else np.nan
+
+    return norm_rev, norm_margin, norm_ebit, norm_da
+
+def capitalize_series(series: pd.Series, years: int, amort_years: int) -> float:
+    """Capitalize an expense like R&D or SG&A: sum of last N years with straight-line amortization."""
+    if series is None or series.empty:
+        return 0.0
+    s = series_to_yearly(series).tail(years).dropna()
+    if s.empty:
+        return 0.0
+    # Apply amortization schedule: for each year i (1 is latest), remaining life fraction = (amort_years - (i-1)) / amort_years
+    cap = 0.0
+    vals = list(s.values)
+    vals.reverse()  # latest first
+    for i, v in enumerate(vals, start=1):
+        remaining = max(0, amort_years - (i - 1))
+        cap += v * (remaining / amort_years)
+    return float(cap)
+
+def compute_epv(
+    ticker: str,
+    fin: Dict[str, pd.DataFrame],
+    inputs: EPVInputs,
+) -> EPVOutputs:
+
+    income = fin["income"]
+    balance = fin["balance"]
+    cashflow = fin["cashflow"]
+
+    norm_rev, norm_margin, norm_ebit, norm_da = normalized_values(
+        income, cashflow, inputs.years, inputs.margin_method, inputs.normalized_margin
+    )
+
+    maint_capex, avg_capex, norm_da_check = estimate_maintenance_capex(
+        inputs.maintenance_method,
+        income,
+        balance,
+        cashflow,
+        inputs.years,
+        inputs.maint_factor,
+        inputs.capital_intensity_years,
+    )
+
+    # optional R&D and SG&A capitalization adjust EBIT (move part from expense to capitalized asset)
+    rd_series = get_line(income, ["Research Development", "Research And Development"])
+    sga_series = get_line(income, ["Selling General Administrative", "Selling General And Administrative", "Selling General And Administration"])
+
+    rd_capital = capitalize_series(rd_series, inputs.years, inputs.rd_years) if inputs.rd_capitalize else 0.0
+    sga_capital = capitalize_series(sga_series, inputs.years, inputs.sga_years) if inputs.sga_capitalize else 0.0
+
+    # For EPV earnings, adding back DA then subtracting Maintenance capex.
+    # If we capitalize R&D/SG&A, we adjust EBIT upwards by the expensed amount replaced with amortization proxy.
+    rd_latest = float(series_to_yearly(rd_series).tail(1).iloc[0]) if rd_series is not None and not series_to_yearly(rd_series).tail(1).empty else 0.0
+    sga_latest = float(series_to_yearly(sga_series).tail(1).iloc[0]) if sga_series is not None and not series_to_yearly(sga_series).tail(1).empty else 0.0
+
+    # Amortization proxy for capitalized intangibles (straight-line)
+    rd_amort = rd_capital / inputs.rd_years if inputs.rd_capitalize and inputs.rd_years > 0 else 0.0
+    sga_amort = sga_capital / inputs.sga_years if inputs.sga_capitalize and inputs.sga_years > 0 else 0.0
+
+    ebit_adj = norm_ebit
+    if inputs.rd_capitalize:
+        ebit_adj = ebit_adj + rd_latest - rd_amort
+    if inputs.sga_capitalize:
+        ebit_adj = ebit_adj + sga_latest - sga_amort
+
+    # DA adjust: if we capitalized R&D/SG&A we might also include amortization in DA, but keep DA separate.
+    # Economic pre-tax operating earnings:
+    pre_tax_operating = ebit_adj + norm_da - maint_capex
+
+    # Effective tax rate
+    tax_rate = np.clip(inputs.tax_rate, 0.0, 0.5)
+    epo_after_tax = pre_tax_operating * (1.0 - tax_rate)
+
+    # WACC
+    wacc = compute_wacc(
+        rf=inputs.rf_rate,
+        mrp=inputs.mrp,
+        beta=inputs.beta,
+        cost_of_debt=inputs.cost_of_debt,
+        tax_rate=tax_rate,
+        equity_weight=inputs.equity_weight,
+        wacc_override=inputs.wacc_override,
+        use_capm=inputs.use_capm,
+    )
+    wacc = max(0.03, float(wacc))  # floor to avoid blowups
+
+    value_operations = max(0.0, epo_after_tax) / wacc
+
+    # Cash & non-operating assets
+    cash_balance = fin.get("cash") or 0.0
+    excess_cash = cash_balance * inputs.excess_cash_pct
+
+    # Non-operating assets heuristic: long-term investments if present
+    lti_series = get_line(balance, ["Long Term Investments", "Long Term Marketable Securities"])
+    non_op_assets = float(lti_series.iloc[-1]) if lti_series is not None and not lti_series.empty else 0.0
+
+    # Add capitalized intangibles to non-operating assets (reproduction value flavor)
+    non_op_assets += rd_capital + sga_capital
+
+    debt = fin.get("total_debt") or 0.0
+
+    equity_value = value_operations + excess_cash + non_op_assets - debt + inputs.other_adjustments
+
+    shares = fin.get("shares") or np.nan
+    if inputs.use_manual_shares and inputs.manual_shares and inputs.manual_shares > 0:
+        shares = float(inputs.manual_shares)
+
+    value_per_share = np.nan
+    if shares and shares > 0:
+        value_per_share = equity_value / shares
+
+    price = fin.get("price") or np.nan
+    if inputs.use_manual_price and inputs.manual_price and inputs.manual_price > 0:
+        price = float(inputs.manual_price)
+
+    upside = np.nan
+    if price and price > 0 and value_per_share and value_per_share > 0:
+        upside = value_per_share / price - 1.0
+
+    return EPVOutputs(
+        normalized_revenue=float(norm_rev),
+        normalized_margin=float(norm_margin),
+        normalized_ebit=float(ebit_adj),
+        normalized_da=float(norm_da),
+        maintenance_capex=float(maint_capex),
+        epo_after_tax=float(epo_after_tax),
+        wacc=float(wacc),
+        value_operations=float(value_operations),
+        cash_adjusted=float(excess_cash),
+        non_operating_assets=float(non_op_assets),
+        debt=float(debt),
+        other_adjustments=float(inputs.other_adjustments),
+        equity_value=float(equity_value),
+        shares=float(shares) if shares else np.nan,
+        value_per_share=float(value_per_share) if value_per_share else np.nan,
+        price=float(price) if price else np.nan,
+        upside=float(upside) if upside else np.nan,
+    )
+
+# -----------------------------
+# Analytics
+# -----------------------------
+
+def sensitivity_grid(
+    base_inputs: EPVInputs,
+    fin: Dict[str, pd.DataFrame],
+    vary_param1: str,
+    values1: np.ndarray,
+    vary_param2: str,
+    values2: np.ndarray,
+) -> pd.DataFrame:
+    rows = []
+    for v1 in values1:
+        for v2 in values2:
+            inp = EPVInputs(**vars(base_inputs))
+            setattr(inp, vary_param1, float(v1))
+            setattr(inp, vary_param2, float(v2))
+            out = compute_epv("", fin, inp)
+            rows.append({
+                "p1": v1,
+                "p2": v2,
+                "value_per_share": out.value_per_share,
+            })
+    df = pd.DataFrame(rows)
+    return df
+
+def tornado_data(base_inputs: EPVInputs, fin: Dict[str, pd.DataFrame], shocks: Dict[str, Tuple[float, float]]) -> pd.DataFrame:
+    base_out = compute_epv("", fin, base_inputs)
+    base_vps = base_out.value_per_share
+    records = []
+    for param, (down, up) in shocks.items():
+        inp_low = EPVInputs(**vars(base_inputs))
+        setattr(inp_low, param, getattr(base_inputs, param) * (1.0 + down))
+        low_vps = compute_epv("", fin, inp_low).value_per_share
+
+        inp_high = EPVInputs(**vars(base_inputs))
+        setattr(inp_high, param, getattr(base_inputs, param) * (1.0 + up))
+        high_vps = compute_epv("", fin, inp_high).value_per_share
+
+        records.append({
+            "parameter": param,
+            "low": low_vps - base_vps,
+            "high": high_vps - base_vps,
+            "base": base_vps,
+        })
+    df = pd.DataFrame(records)
+    return df.sort_values(by=["high"], ascending=False)
+
+def monte_carlo(
+    base_inputs: EPVInputs,
+    fin: Dict[str, pd.DataFrame],
+    n: int,
+    dists: Dict[str, Dict[str, float]],
+) -> pd.DataFrame:
+    # dists: param -> {"mu": , "sigma": , "min": , "max": }
+    rng = np.random.default_rng(42)
+    samples = []
+    for _ in range(n):
+        inp = EPVInputs(**vars(base_inputs))
+        for param, spec in dists.items():
+            mu, sigma = spec.get("mu", 0.0), spec.get("sigma", 0.0)
+            lo, hi = spec.get("min", -np.inf), spec.get("max", np.inf)
+            val = rng.normal(mu, sigma)
+            val = np.clip(val, lo, hi)
+            setattr(inp, param, float(val))
+        out = compute_epv("", fin, inp)
+        samples.append(out.value_per_share)
+    return pd.DataFrame({"value_per_share": samples}).dropna()
+
+# -----------------------------
+# UI
+# -----------------------------
+
+st.title("Greenwald Earnings Power Valuation (EPV)")
+
+with st.sidebar:
+    st.subheader("Company")
+    ticker = st.text_input("Ticker", value="AAPL").upper().strip()
+    st.caption("Data source: Yahoo Finance (yfinance). Edit assumptions in the main panel.")
+
+if not ticker:
+    st.stop()
+
+with st.spinner("Fetching financials..."):
+    fin = fetch_yf_statements(ticker)
+
+info = fin.get("info", {})
+price = fin.get("price", np.nan)
+shares = fin.get("shares", np.nan)
+market_cap = fin.get("market_cap", np.nan)
+beta_guess = fin.get("beta", 1.0) or 1.0
+
+col_a, col_b, col_c, col_d = st.columns(4)
+col_a.metric("Price", f"${price:,.2f}" if price == price else "—")
+col_b.metric("Market Cap", f"${market_cap:,.0f}" if market_cap==market_cap else "—")
+col_c.metric("Shares Out", f"{shares:,.0f}" if shares==shares else "—")
+col_d.metric("Beta (Yahoo)", f"{beta_guess:.2f}" if beta_guess==beta_guess else "—")
+
+st.markdown("-----")
+
+# Inputs
+st.subheader("Model Inputs")
+
+def pct_slider(label, value, minv=0.0, maxv=1.0, step=0.01):
+    return st.slider(label, min_value=float(minv), max_value=float(maxv), value=float(value), step=float(step))
+
+with st.expander("Normalization & Accounting", expanded=True):
+    years = st.slider("Historical years used", 3, 10, 5, 1)
+    margin_method = st.selectbox("Margin method", ["median", "mean", "trimmed"])
+    user_margin_flag = st.checkbox("Override normalized EBIT margin", value=False)
+    user_margin = None
+    if user_margin_flag:
+        user_margin = st.number_input("Normalized EBIT margin", min_value=-1.0, max_value=1.0, value=0.20, step=0.01)
+
+    tax_rate = st.slider("Tax rate", 0.0, 0.5, 0.21, 0.01)
+
+    maintenance_method = st.selectbox("Maintenance capex method", ["depr_factor", "sales_based"])
+    maint_factor = st.slider("Maintenance factor (as % of D&A)", 0.0, 2.0, 1.0, 0.05)
+    capital_intensity_years = st.slider("Years to estimate capital intensity (sales-based)", 3, 10, 5, 1)
+
+    excess_cash_pct = st.slider("Excess cash as % of cash & ST investments", 0.0, 1.0, 1.0, 0.05)
+
+    st.markdown("Optional capitalization adjustments (heuristics)")
+    rd_capitalize = st.checkbox("Capitalize R&D", value=False)
+    rd_years = st.slider("R&D amortization years", 1, 10, 5, 1, disabled=not rd_capitalize)
+    sga_capitalize = st.checkbox("Capitalize SG&A (brand/customer build)", value=False)
+    sga_years = st.slider("SG&A amortization years", 1, 10, 5, 1, disabled=not sga_capitalize)
+
+with st.expander("Cost of Capital", expanded=True):
+    use_capm = st.checkbox("Use CAPM for cost of equity", value=True)
+    rf_rate = st.number_input("Risk-free rate", min_value=0.0, max_value=0.15, value=0.042, step=0.001, format="%.3f")
+    mrp = st.number_input("Market risk premium", min_value=0.0, max_value=0.15, value=0.050, step=0.001, format="%.3f")
+    beta = st.number_input("Beta (if CAPM) or cost of equity (if unchecked)", value=float(beta_guess if beta_guess==beta_guess else 1.0), step=0.05)
+    cost_of_debt = st.number_input("Pre-tax cost of debt", min_value=0.0, max_value=0.20, value=0.05, step=0.005, format="%.3f")
+    equity_weight = pct_slider("Equity weight in capital structure", 0.85, 0.0, 1.0, 0.01)
+    wacc_override_flag = st.checkbox("Override WACC", value=False)
+    wacc_override = st.number_input("WACC override", min_value=0.0, max_value=0.30, value=0.10, step=0.005, format="%.3f", disabled=not wacc_override_flag)
+
+with st.expander("Other Adjustments & Overrides"):
+    other_adjustments = st.number_input("Other adjustments to equity value ($)", value=0.0, step=1_000_000.0, format="%.0f")
+    use_manual_shares = st.checkbox("Override shares outstanding", value=False)
+    manual_shares = st.number_input("Manual shares", value=float(shares if shares==shares else 0.0), step=1_000_000.0, format="%.0f", disabled=not use_manual_shares)
+    use_manual_price = st.checkbox("Override market price", value=False)
+    manual_price = st.number_input("Manual price", value=float(price if price==price else 0.0), step=0.01, disabled=not use_manual_price)
+
+inputs = EPVInputs(
+    years=years,
+    margin_method=margin_method,
+    normalized_margin=user_margin if user_margin_flag else None,
+    tax_rate=tax_rate,
+    rf_rate=rf_rate,
+    mrp=mrp,
+    beta=beta,
+    cost_of_debt=cost_of_debt,
+    use_capm=use_capm,
+    equity_weight=equity_weight,
+    maintenance_method=maintenance_method,
+    maint_factor=maint_factor,
+    capital_intensity_years=capital_intensity_years,
+    excess_cash_pct=excess_cash_pct,
+    rd_capitalize=rd_capitalize,
+    rd_years=rd_years,
+    sga_capitalize=sga_capitalize,
+    sga_years=sga_years,
+    other_adjustments=other_adjustments,
+    use_manual_shares=use_manual_shares,
+    manual_shares=manual_shares if use_manual_shares else None,
+    use_manual_price=use_manual_price,
+    manual_price=manual_price if use_manual_price else None,
+    wacc_override=wacc_override if wacc_override_flag else None,
+)
+
+# Compute valuation
+out = compute_epv(ticker, fin, inputs)
+
+# Display key results
+st.subheader("Valuation Summary")
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Normalized Revenue", f"${out.normalized_revenue:,.0f}")
+c2.metric("Normalized EBIT Margin", f"{out.normalized_margin*100:,.1f}%")
+c3.metric("Maintenance Capex", f"${out.maintenance_capex:,.0f}")
+c4.metric("After-tax EPO", f"${out.epo_after_tax:,.0f}")
+
+c5, c6, c7, c8 = st.columns(4)
+c5.metric("WACC", f"{out.wacc*100:,.2f}%")
+c6.metric("Value of Operations", f"${out.value_operations:,.0f}")
+c7.metric("Equity Value", f"${out.equity_value:,.0f}")
+c8.metric("Value / Share", f"${out.value_per_share:,.2f}")
+
+c9, c10 = st.columns(2)
+c9.metric("Price", f"${out.price:,.2f}" if out.price==out.price else "—")
+if out.upside == out.upside:
+    c10.metric("Upside", f"{out.upside*100:,.1f}%")
+else:
+    c10.metric("Upside", "—")
+
+st.markdown("-----")
+
+# Valuation bridge chart
+bridge_df = pd.DataFrame([
+    {"label": "Value of operations", "value": out.value_operations},
+    {"label": "Excess cash", "value": out.cash_adjusted},
+    {"label": "Non-operating assets", "value": out.non_operating_assets},
+    {"label": "Debt", "value": -out.debt},
+    {"label": "Other adjustments", "value": out.other_adjustments},
+])
+
+st.subheader("Valuation Bridge")
+bridge_chart = alt.Chart(bridge_df.assign(order=np.arange(len(bridge_df)))).mark_bar().encode(
+    x=alt.X("order:O", axis=alt.Axis(title=None, labels=False, ticks=False)),
+    y=alt.Y("value:Q", axis=alt.Axis(title="USD")),
+    color=alt.condition(
+        alt.datum.value > 0,
+        alt.value("#2ca02c"),
+        alt.value("#d62728")
+    ),
+    tooltip=["label", alt.Tooltip("value:Q", format=",.0f")]
+).properties(height=300).facet(
+    column=alt.Column("label:N", header=alt.Header(labelAngle=0, labelAlign="center"))
+)
+st.altair_chart(bridge_chart, use_container_width=True)
+
+# Sensitivities
+st.subheader("Sensitivity Analysis")
+
+s1, s2 = st.columns(2)
+with s1:
+    st.markdown("Heatmap: WACC vs. EBIT margin")
+    wacc_vals = np.linspace(max(0.04, out.wacc*0.6), out.wacc*1.6, 11)
+    margin_vals = np.linspace(out.normalized_margin*0.6, out.normalized_margin*1.4, 11)
+    df_heat = sensitivity_grid(inputs, fin, "wacc_override", wacc_vals, "normalized_margin", margin_vals)
+    heat = alt.Chart(df_heat).mark_rect().encode(
+        x=alt.X("p1:Q", title="WACC"),
+        y=alt.Y("p2:Q", title="EBIT margin"),
+        color=alt.Color("value_per_share:Q", title="$/share", scale=alt.Scale(scheme="viridis")),
+        tooltip=[alt.Tooltip("value_per_share:Q", format=",.2f"), "p1", "p2"]
+    ).properties(height=300)
+    st.altair_chart(heat, use_container_width=True)
+
+with s2:
+    st.markdown("Heatmap: WACC vs. Maintenance factor (as % of D&A)")
+    maint_vals = np.linspace(max(0.2, inputs.maint_factor*0.5), inputs.maint_factor*1.5, 11)
+    df_heat2 = sensitivity_grid(inputs, fin, "wacc_override", wacc_vals, "maint_factor", maint_vals)
+    heat2 = alt.Chart(df_heat2).mark_rect().encode(
+        x=alt.X("p1:Q", title="WACC"),
+        y=alt.Y("p2:Q", title="Maintenance factor"),
+        color=alt.Color("value_per_share:Q", title="$/share", scale=alt.Scale(scheme="magma")),
+        tooltip=[alt.Tooltip("value_per_share:Q", format=",.2f"), "p1", "p2"]
+    ).properties(height=300)
+    st.altair_chart(heat2, use_container_width=True)
+
+# Tornado
+st.subheader("Tornado: Parameter impact on $/share")
+shock_defaults = {
+    "normalized_margin": (-0.2, 0.2),
+    "maint_factor": (-0.3, 0.3),
+    "tax_rate": (-0.2, 0.2),
+    "rf_rate": (-0.3, 0.3),
+    "mrp": (-0.3, 0.3),
+    "beta": (-0.3, 0.3),
+    "cost_of_debt": (-0.3, 0.3),
+    "equity_weight": (-0.2, 0.2),
+}
+tornado_df = tornado_data(inputs, fin, shock_defaults)
+if not tornado_df.empty:
+    base_v = out.value_per_share
+    bars_low = alt.Chart(tornado_df).mark_bar(color="#d62728").encode(
+        y=alt.Y("parameter:N", sort="-x"),
+        x=alt.X("low:Q", title="Δ $/share vs base"),
+        tooltip=[alt.Tooltip("low:Q", format=",.2f")]
+    )
+    bars_high = alt.Chart(tornado_df).mark_bar(color="#2ca02c").encode(
+        y=alt.Y("parameter:N", sort="-x"),
+        x=alt.X("high:Q"),
+        tooltip=[alt.Tooltip("high:Q", format=",.2f")]
+    )
+    st.altair_chart((bars_low + bars_high).resolve_scale(x="independent").properties(height=350), use_container_width=True)
+
+# Monte Carlo
+st.subheader("Monte Carlo Simulation")
+mc_cols = st.columns(3)
+with mc_cols[0]:
+    n_sims = st.number_input("Simulations", min_value=100, max_value=100000, value=5000, step=100)
+with mc_cols[1]:
+    margin_mu = st.number_input("Margin μ", value=float(out.normalized_margin), step=0.005, format="%.4f")
+    margin_sigma = st.number_input("Margin σ", value=float(max(0.01, out.normalized_margin*0.15)), step=0.001, format="%.4f")
+with mc_cols[2]:
+    wacc_mu = st.number_input("WACC μ", value=float(out.wacc), step=0.001, format="%.4f")
+    wacc_sigma = st.number_input("WACC σ", value=0.01, step=0.001, format="%.4f")
+
+dists = {
+    "normalized_margin": {"mu": margin_mu, "sigma": margin_sigma, "min": -0.2, "max": 0.6},
+    "wacc_override": {"mu": wacc_mu, "sigma": wacc_sigma, "min": 0.03, "max": 0.25},
+}
+with st.spinner("Running simulation..."):
+    mc_df = monte_carlo(inputs, fin, int(n_sims), dists)
+
+if not mc_df.empty:
+    q = mc_df["value_per_share"].quantile([0.05, 0.25, 0.5, 0.75, 0.95]).to_frame("value").reset_index(names="quantile")
+    c1, c2 = st.columns([2,1])
+    with c1:
+        hist = alt.Chart(mc_df).mark_bar().encode(
+            x=alt.X("value_per_share:Q", bin=alt.Bin(maxbins=50), title="$/share"),
+            y=alt.Y("count()", title="Frequency"),
+            tooltip=[alt.Tooltip("count()", title="Count")]
+        ).properties(height=300)
+        st.altair_chart(hist, use_container_width=True)
+    with c2:
+        st.write("Percentiles ($/share)")
+        for row in q.itertuples():
+            st.write(f"{row.quantile*100:.0f}%: ${row.value:,.2f}")
+
+# Data preview
+st.subheader("Financial Statements (last years)")
+tabs = st.tabs(["Income", "Balance Sheet", "Cash Flow"])
+def style_df(df: pd.DataFrame):
+    if df is None or df.empty:
+        return pd.DataFrame()
+    dff = df.copy()
+    dff.columns = [c.strftime("%Y-%m-%d") if hasattr(c, "strftime") else str(c) for c in dff.columns]
+    return dff
+
+with tabs[0]:
+    st.dataframe(style_df(fin["income"]).tail(50), use_container_width=True, height=400)
+with tabs[1]:
+    st.dataframe(style_df(fin["balance"]).tail(50), use_container_width=True, height=400)
+with tabs[2]:
+    st.dataframe(style_df(fin["cashflow"]).tail(50), use_container_width=True, height=400)
+
+st.caption("This tool is for educational/informational purposes only and is not investment advice. Data may contain errors; always verify and apply judgment.")
+```
+
+What this MVP does
+
+- Pulls financials via yfinance.
+- Normalizes revenue, EBIT margin, and D&A over a configurable period.
+- Estimates maintenance capex via two approaches.
+- Calculates after-tax EPO and EPV of operations, adds non-operating assets (cash, long-term investments, capitalized intangibles), subtracts debt and other claims.
+- Provides a full analytic suite: sensitivities, heatmaps, tornado, and Monte Carlo.
+- Gives you explicit control for judgment calls: margin override, tax rate, maintenance factors, cost of capital, excess cash, and custom adjustments.
+
+Nice-to-haves you can add next
+
+- Add alternative data providers (FMP, Tiingo, Intrinio) and a data source selector.
+- Handle leases explicitly: capitalize operating leases where appropriate; adjust EBIT and debt.
+- Separate domestic vs foreign tax rates; NOLs and tax shields modeling.
+- More robust reproduction value module (asset-by-asset, including working capital norms).
+- Export valuation pack to PDF/Excel.
+- Multi-segment normalization if available (by business/geography).
+- Batch processing for screening.
+
+Want me to tailor defaults for your process (e.g., capitalizing R&D for software, or industry-specific capex heuristics)? Or deploy this as a shareable web app (Streamlit Cloud / Docker + Fly.io/Render)?

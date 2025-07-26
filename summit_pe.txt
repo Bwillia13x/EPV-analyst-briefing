@@ -1,0 +1,920 @@
+Below is a complete, production-grade Python CLI application you can run locally to model the intrinsic value of a medispa/private medical aesthetics clinic (single site or multi-site), including a capacity-based operating build, DCF with rigorous WACC, terminal value, full financial statements, sensitivity (tornado) and Monte Carlo analysis. It’s designed for a private equity analyst with robust assumptions, audit-ready math, and a clean, “beautiful” CLI experience.
+
+It ships with a realistic Base Case configuration you can use out of the box and then customize interactively.
+
+How to use
+1) Install dependencies
+- Python 3.9+
+- pip install: rich typer numpy
+
+Command:
+pip install rich typer numpy
+
+2) Save the code below as medispa_valuation_cli.py
+
+3) Generate a starter config:
+python medispa_valuation_cli.py init --file config.json
+
+4) Optional wizard to tailor key drivers:
+python medispa_valuation_cli.py wizard --file config.json
+
+5) Run the DCF and print results:
+python medispa_valuation_cli.py run --file config.json
+
+6) Sensitivity analysis (tornado):
+python medispa_valuation_cli.py sensitivity --file config.json
+
+7) Monte Carlo:
+python medispa_valuation_cli.py mc --file config.json --iterations 3000
+
+8) Export forecast to CSV:
+python medispa_valuation_cli.py run --file config.json --export forecast.csv
+
+Code: medispa_valuation_cli.py
+```python
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import math
+import random
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import typer
+from rich import box
+from rich.align import Align
+from rich.console import Console
+from rich.panel import Panel
+from rich.prompt import Prompt, FloatPrompt, IntPrompt, Confirm
+from rich.table import Table
+from rich.text import Text
+
+app = typer.Typer(add_completion=False)
+console = Console()
+
+# ------------- Data Models ------------- #
+
+@dataclass
+class ProcedureCategory:
+    name: str
+    avg_price_year1: float
+    price_inflation: float  # annual, e.g., 0.03
+    avg_duration_min: float
+    material_cost_per_proc: float
+    volume_growth: float  # annual unit growth (independent of capacity)
+
+@dataclass
+class ProviderType:
+    name: str
+    fte_per_clinic_year1: float
+    fte_growth: float  # annual
+    base_salary_per_fte: float
+    benefits_load: float  # e.g., 0.15 => 15% benefits on base
+    commission_by_category: Dict[str, float]  # % of category revenue owed
+    hours_per_week: float
+    weeks_per_year: float
+    utilization: float  # 0.75
+    category_mix: Dict[str, float]  # sum <= 1 across categories for this provider
+
+@dataclass
+class EquipmentAsset:
+    name: str
+    cost: float
+    purchase_year: int  # 1-indexed forecast year
+    life_years: int
+    salvage_value: float = 0.0
+    annual_maintenance_pct: float = 0.02  # as % of initial cost
+
+@dataclass
+class FixedExpense:
+    name: str
+    amount_year1: float
+    growth: float  # annual escalation
+
+@dataclass
+class VariableExpense:
+    name: str
+    pct_of_revenue: float  # e.g., marketing 8%
+
+@dataclass
+class MembershipSettings:
+    monthly_fee: float
+    members_per_clinic_year1: int
+    members_growth: float  # annual member count growth
+    annual_churn: float  # fraction churned per year
+
+@dataclass
+class RetailSettings:
+    pct_of_service_revenue: float
+    gross_margin: float
+
+@dataclass
+class WorkingCapitalSettings:
+    dso_days: int  # typical 0-10 for medispa (mostly POS)
+    dio_days: int  # inventory (toxins/fillers)
+    dpo_days: int  # payables on inventory
+    membership_deferral_months: int  # if prepayment, e.g., 1
+
+@dataclass
+class WACCSettings:
+    risk_free_rate: float
+    equity_risk_premium: float
+    beta: float
+    size_premium: float
+    specific_risk: float
+    pre_tax_cost_of_debt: float
+    target_debt_to_total_cap: float
+    tax_rate: float
+
+@dataclass
+class TerminalSettings:
+    method: str  # "gordon" or "exit"
+    gordon_growth: float
+    exit_ebitda_multiple: float
+
+@dataclass
+class ExpansionSettings:
+    clinics_year1: int
+    new_clinics_per_year: List[int]  # len = forecast_years
+
+@dataclass
+class ModelConfig:
+    name: str
+    currency: str
+    forecast_years: int
+    corporate_tax_rate: float
+    inflation: float
+
+    procedure_categories: List[ProcedureCategory]
+    provider_types: List[ProviderType]
+    equipment_assets: List[EquipmentAsset]
+
+    fixed_opex: List[FixedExpense]
+    variable_opex: List[VariableExpense]
+
+    membership: MembershipSettings
+    retail: RetailSettings
+    working_capital: WorkingCapitalSettings
+    wacc: WACCSettings
+    terminal: TerminalSettings
+    expansion: ExpansionSettings
+
+    maintenance_capex_pct_of_revenue: float  # e.g., 0.02
+    net_debt: float  # for equity bridge
+    cash_minimum: float  # optional cash floor (not used in DCF, for sanity checks)
+
+# ------------- Utility ------------- #
+
+def _years(n: int) -> List[int]:
+    return list(range(1, n + 1))
+
+def _pp(value: float) -> str:
+    return f"{value:,.0f}"
+
+def _pct(p: float) -> str:
+    return f"{p*100:.1f}%"
+
+def _safe_get(dct: Dict[str, float], key: str, default: float = 0.0) -> float:
+    return dct.get(key, default)
+
+def _validate_config(cfg: ModelConfig) -> List[str]:
+    issues = []
+    cat_names = {c.name for c in cfg.procedure_categories}
+    # Provider category mixes
+    for p in cfg.provider_types:
+        s = sum(p.category_mix.values())
+        if s > 1.0 + 1e-6:
+            issues.append(f"Provider '{p.name}' category_mix sums to {s:.2f} (>1.0).")
+        unknown = set(p.category_mix.keys()) - cat_names
+        if unknown:
+            issues.append(f"Provider '{p.name}' category_mix has unknown categories {unknown}.")
+        for k, v in p.commission_by_category.items():
+            if k not in cat_names:
+                issues.append(f"Provider '{p.name}' commission category '{k}' is unknown.")
+            if v < 0 or v > 0.8:
+                issues.append(f"Provider '{p.name}' commission for '{k}' = {_pct(v)} looks off.")
+    if cfg.terminal.method not in ("gordon", "exit"):
+        issues.append("terminal.method must be 'gordon' or 'exit'.")
+    if cfg.terminal.method == "gordon" and cfg.terminal.gordon_growth >= (
+        cfg.wacc.risk_free_rate + cfg.wacc.equity_risk_premium
+    ):
+        issues.append("Gordon growth >= market return. Re-check assumptions.")
+    return issues
+
+# ------------- Core Model ------------- #
+
+class ValuationModel:
+    def __init__(self, cfg: ModelConfig):
+        self.cfg = cfg
+        issues = _validate_config(cfg)
+        if issues:
+            console.print(Panel("\n".join(issues), title="Config Validation Warnings", style="yellow"))
+
+    def clinics_by_year(self) -> List[int]:
+        years = _years(self.cfg.forecast_years)
+        counts = []
+        total = self.cfg.expansion.clinics_year1
+        adds = self.cfg.expansion.new_clinics_per_year
+        if len(adds) < self.cfg.forecast_years:
+            adds = adds + [0] * (self.cfg.forecast_years - len(adds))
+        for i, y in enumerate(years):
+            total += adds[i] if i > 0 else 0  # year1 already counted
+            counts.append(total)
+        return counts
+
+    def wacc(self) -> float:
+        w = self.cfg.wacc
+        ke = w.risk_free_rate + w.beta * w.equity_risk_premium + w.size_premium + w.specific_risk
+        kd_after = w.pre_tax_cost_of_debt * (1 - w.tax_rate)
+        D = w.target_debt_to_total_cap
+        E = 1 - D
+        return E * ke + D * kd_after
+
+    def _category_price(self, cat: ProcedureCategory, year_idx: int) -> float:
+        return cat.avg_price_year1 * ((1 + cat.price_inflation) ** (year_idx))
+
+    def run_forecast(self) -> Tuple[List[Dict], Dict]:
+        cfg = self.cfg
+        years = _years(cfg.forecast_years)
+        clinics = self.clinics_by_year()
+
+        # pre-index categories and providers
+        cat_by_name = {c.name: c for c in cfg.procedure_categories}
+        providers = cfg.provider_types
+
+        # Pre-calc provider yearly FTE and minutes supply by category
+        # and commission allocations by category
+        results: List[Dict] = []
+
+        # Keep track of asset depreciation schedules
+        dep_by_year = [0.0] * len(years)
+        capex_by_year = [0.0] * len(years)
+        maint_by_year = [0.0] * len(years)
+
+        # Build depreciation schedules for equipment assets
+        for asset in cfg.equipment_assets:
+            if asset.purchase_year < 1 or asset.purchase_year > len(years):
+                continue
+            capex_by_year[asset.purchase_year - 1] += asset.cost
+            for i in range(asset.life_years):
+                idx = asset.purchase_year - 1 + i
+                if idx < len(dep_by_year):
+                    annual_dep = (asset.cost - asset.salvage_value) / asset.life_years
+                    dep_by_year[idx] += max(0.0, annual_dep)
+            # equipment maintenance (percent of initial cost)
+            for idx in range(asset.purchase_year - 1, len(years)):
+                maint_by_year[idx] += asset.annual_maintenance_pct * asset.cost
+
+        # Operating expense escalators
+        fixed_opex_base = [fe.amount_year1 for fe in cfg.fixed_opex]
+
+        # Membership dynamics by clinic
+        members_by_year: List[int] = []
+        members = cfg.membership.members_per_clinic_year1
+        for y in years:
+            # churn then growth in sign-ups, approximate net
+            members = int(members * (1 - cfg.membership.annual_churn) * (1 + cfg.membership.members_growth))
+            members_by_year.append(max(0, members))
+
+        # Forecast loop
+        ar_last, inv_last, ap_last, defrev_last = 0.0, 0.0, 0.0, 0.0
+
+        for idx, y in enumerate(years):
+            num_clinics = clinics[idx]
+
+            # Provider supply (minutes) and splitting across categories
+            cat_minutes: Dict[str, float] = {c.name: 0.0 for c in cfg.procedure_categories}
+            prov_minutes_by_cat: Dict[Tuple[str, str], float] = {}  # (provider, category)->minutes
+            prov_min_total: Dict[str, float] = {}
+
+            # FTE evolving per clinic
+            for p in providers:
+                fte_per_clinic = p.fte_per_clinic_year1 * ((1 + p.fte_growth) ** idx)
+                fte_total = fte_per_clinic * num_clinics
+                minutes_total = fte_total * p.hours_per_week * p.weeks_per_year * 60.0 * p.utilization
+                prov_min_total[p.name] = minutes_total
+                # allocate minutes by category
+                for cat_name, share in p.category_mix.items():
+                    mins = minutes_total * share
+                    prov_minutes_by_cat[(p.name, cat_name)] = mins
+                    cat_minutes[cat_name] = cat_minutes.get(cat_name, 0.0) + mins
+
+            # Convert capacity minutes to procedure counts and revenue per category
+            category_rows: List[Dict] = []
+            service_revenue = 0.0
+            material_costs = 0.0
+            commission_costs = 0.0
+
+            for cat in cfg.procedure_categories:
+                minutes = cat_minutes.get(cat.name, 0.0)
+                procs_supply = minutes / max(1e-6, cat.avg_duration_min)
+                # Allow independent unit growth (e.g., demand > supply); constrain by supply
+                # For clinical realism, cap by supply. If you want unconstrained demand, set provider capacity high.
+                unit_growth_multiplier = (1 + cat.volume_growth) ** idx
+                procs = min(procs_supply, procs_supply * unit_growth_multiplier)  # capacity-constrained
+                price = self._category_price(cat, idx)
+                revenue = procs * price
+                mat_cost = procs * cat.material_cost_per_proc
+
+                # Allocate revenue to providers for commission by minute share
+                # Avoid division by zero
+                commission = 0.0
+                if minutes > 0:
+                    for p in providers:
+                        pmins = prov_minutes_by_cat.get((p.name, cat.name), 0.0)
+                        if pmins <= 0:
+                            continue
+                        share = pmins / minutes
+                        c_rate = _safe_get(p.commission_by_category, cat.name, 0.0)
+                        commission += revenue * share * c_rate
+
+                category_rows.append(
+                    dict(
+                        year=y,
+                        category=cat.name,
+                        procedures=procs,
+                        price=price,
+                        revenue=revenue,
+                        material_cost=mat_cost,
+                        commission_cost=commission,
+                    )
+                )
+                service_revenue += revenue
+                material_costs += mat_cost
+                commission_costs += commission
+
+            # Membership and retail revenue
+            members_count = members_by_year[idx] * num_clinics
+            membership_rev_gross = members_count * cfg.membership.monthly_fee * 12.0
+            # Deferred revenue if prepayment
+            membership_def_months = cfg.working_capital.membership_deferral_months
+            deferred_portion = membership_rev_gross * (membership_def_months / 12.0) if membership_def_months > 0 else 0.0
+
+            retail_revenue = service_revenue * cfg.retail.pct_of_service_revenue
+            retail_cogs = retail_revenue * (1 - cfg.retail.gross_margin)
+
+            total_revenue = service_revenue + membership_rev_gross + retail_revenue
+
+            # Provider base comp and benefits
+            provider_fixed_comp = 0.0
+            for p in providers:
+                fte_per_clinic = p.fte_per_clinic_year1 * ((1 + p.fte_growth) ** idx)
+                fte_total = fte_per_clinic * num_clinics
+                base = fte_total * p.base_salary_per_fte * (1 + p.benefits_load)
+                provider_fixed_comp += base
+
+            # Opex
+            fixed_opex_sum = 0.0
+            for i, fe in enumerate(cfg.fixed_opex):
+                amt = fe.amount_year1 * ((1 + fe.growth) ** idx)
+                fixed_opex_sum += amt
+
+            variable_opex_sum = 0.0
+            for ve in cfg.variable_opex:
+                variable_opex_sum += total_revenue * ve.pct_of_revenue
+
+            # Maintenance capex (scaled to revenue)
+            maint_capex = cfg.maintenance_capex_pct_of_revenue * total_revenue + maint_by_year[idx]
+            capex = capex_by_year[idx] + maint_capex
+
+            # Gross margin
+            cogs = material_costs + retail_cogs + commission_costs + provider_fixed_comp
+            gross_profit = total_revenue - cogs
+
+            # EBITDA
+            opex_total = fixed_opex_sum + variable_opex_sum
+            ebitda = gross_profit - opex_total
+
+            # Depreciation
+            depreciation = dep_by_year[idx]
+
+            # EBIT and taxes
+            ebit = ebitda - depreciation
+            nopat = ebit * (1 - cfg.corporate_tax_rate)
+
+            # Working capital
+            dso = cfg.working_capital.dso_days
+            dio = cfg.working_capital.dio_days
+            dpo = cfg.working_capital.dpo_days
+            days = 365.0
+
+            ar = total_revenue * (dso / days)
+            inv = (material_costs + retail_cogs) * (dio / days)
+            ap = (material_costs + retail_cogs) * (dpo / days)
+            defrev = deferred_portion
+
+            delta_nwc = (ar - ar_last) + (inv - inv_last) - (ap - ap_last) + (defrev - defrev_last)
+            ar_last, inv_last, ap_last, defrev_last = ar, inv, ap, defrev
+
+            # Unlevered FCF
+            ufcf = nopat + depreciation - capex - delta_nwc
+
+            results.append(
+                dict(
+                    year=y,
+                    clinics=num_clinics,
+                    service_revenue=service_revenue,
+                    membership_revenue=membership_rev_gross,
+                    retail_revenue=retail_revenue,
+                    total_revenue=total_revenue,
+                    material_costs=material_costs,
+                    retail_cogs=retail_cogs,
+                    commission_costs=commission_costs,
+                    provider_fixed_comp=provider_fixed_comp,
+                    gross_profit=gross_profit,
+                    fixed_opex=fixed_opex_sum,
+                    variable_opex=variable_opex_sum,
+                    ebitda=ebitda,
+                    depreciation=depreciation,
+                    ebit=ebit,
+                    nopat=nopat,
+                    capex=capex,
+                    delta_nwc=delta_nwc,
+                    ufcf=ufcf,
+                    ar=ar,
+                    inv=inv,
+                    ap=ap,
+                    deferred_rev=defrev,
+                )
+            )
+
+        # Terminal value
+        wacc = self.wacc()
+        cashflows = [r["ufcf"] for r in results]
+        years_len = len(cashflows)
+        discount_factors = [(1 / ((1 + wacc) ** i)) for i in range(1, years_len + 1)]
+        pv_flows = sum(cf * df for cf, df in zip(cashflows, discount_factors))
+
+        last = results[-1]
+        if cfg.terminal.method == "gordon":
+            tv = last["ufcf"] * (1 + cfg.terminal.gordon_growth) / (wacc - cfg.terminal.gordon_growth)
+        else:
+            tv = last["ebitda"] * cfg.terminal.exit_ebitda_multiple
+
+        pv_tv = tv / ((1 + wacc) ** years_len)
+        ev = pv_flows + pv_tv
+        equity_value = ev - cfg.net_debt
+
+        meta = dict(
+            wacc=wacc,
+            pv_flows=pv_flows,
+            terminal_value=tv,
+            pv_terminal=pv_tv,
+            enterprise_value=ev,
+            equity_value=equity_value,
+        )
+        return results, meta
+
+
+# ------------- CLI Helpers ------------- #
+
+def _sample_config() -> ModelConfig:
+    categories = [
+        ProcedureCategory("Injectables", avg_price_year1=650, price_inflation=0.03, avg_duration_min=45, material_cost_per_proc=220, volume_growth=0.05),
+        ProcedureCategory("Laser/Device", avg_price_year1=350, price_inflation=0.02, avg_duration_min=45, material_cost_per_proc=20, volume_growth=0.04),
+        ProcedureCategory("Skin/Facial", avg_price_year1=200, price_inflation=0.02, avg_duration_min=60, material_cost_per_proc=35, volume_growth=0.03),
+        ProcedureCategory("Body Contouring", avg_price_year1=900, price_inflation=0.02, avg_duration_min=60, material_cost_per_proc=120, volume_growth=0.05),
+    ]
+    providers = [
+        ProviderType(
+            name="Injector (NP/PA/RN)",
+            fte_per_clinic_year1=1.8,
+            fte_growth=0.03,
+            base_salary_per_fte=95000,
+            benefits_load=0.15,
+            commission_by_category={"Injectables": 0.32, "Laser/Device": 0.10},
+            hours_per_week=36,
+            weeks_per_year=48,
+            utilization=0.80,
+            category_mix={"Injectables": 0.70, "Laser/Device": 0.10, "Skin/Facial": 0.10, "Body Contouring": 0.10},
+        ),
+        ProviderType(
+            name="Esthetician/Laser Tech",
+            fte_per_clinic_year1=1.6,
+            fte_growth=0.03,
+            base_salary_per_fte=60000,
+            benefits_load=0.15,
+            commission_by_category={"Laser/Device": 0.12, "Skin/Facial": 0.08, "Body Contouring": 0.12},
+            hours_per_week=36,
+            weeks_per_year=48,
+            utilization=0.75,
+            category_mix={"Laser/Device": 0.45, "Skin/Facial": 0.35, "Body Contouring": 0.20},
+        ),
+        ProviderType(
+            name="Medical Director (MD)",
+            fte_per_clinic_year1=0.2,
+            fte_growth=0.00,
+            base_salary_per_fte=220000,
+            benefits_load=0.0,
+            commission_by_category={},
+            hours_per_week=8,
+            weeks_per_year=48,
+            utilization=0.50,
+            category_mix={"Injectables": 0.20},  # oversight time
+        ),
+    ]
+    equipment_assets = [
+        EquipmentAsset(name="Laser Platform A", cost=180000, purchase_year=1, life_years=7, salvage_value=10000, annual_maintenance_pct=0.03),
+        EquipmentAsset(name="Body Contour Device", cost=150000, purchase_year=2, life_years=7, salvage_value=8000, annual_maintenance_pct=0.03),
+        EquipmentAsset(name="Skin/Facial System", cost=50000, purchase_year=1, life_years=5, salvage_value=5000, annual_maintenance_pct=0.02),
+    ]
+    fixed_opex = [
+        FixedExpense("Rent", amount_year1=220000, growth=0.03),
+        FixedExpense("Admin/Front Desk", amount_year1=180000, growth=0.03),
+        FixedExpense("Insurance & Malpractice", amount_year1=45000, growth=0.03),
+        FixedExpense("IT/EMR/Subscriptions", amount_year1=30000, growth=0.04),
+        FixedExpense("Med Director Stipend", amount_year1=60000, growth=0.00),
+        FixedExpense("Other G&A", amount_year1=60000, growth=0.03),
+    ]
+    variable_opex = [
+        VariableExpense("Marketing", pct_of_revenue=0.08),
+        VariableExpense("Payment Processing", pct_of_revenue=0.02),
+        VariableExpense("Supplies (non-COGS)", pct_of_revenue=0.01),
+    ]
+    membership = MembershipSettings(
+        monthly_fee=99.0,
+        members_per_clinic_year1=450,
+        members_growth=0.10,
+        annual_churn=0.30,
+    )
+    retail = RetailSettings(
+        pct_of_service_revenue=0.08,
+        gross_margin=0.55,
+    )
+    wc = WorkingCapitalSettings(dso_days=5, dio_days=35, dpo_days=30, membership_deferral_months=1)
+    wacc = WACCSettings(
+        risk_free_rate=0.04,
+        equity_risk_premium=0.055,
+        beta=1.05,
+        size_premium=0.015,
+        specific_risk=0.01,
+        pre_tax_cost_of_debt=0.10,
+        target_debt_to_total_cap=0.40,
+        tax_rate=0.26,
+    )
+    terminal = TerminalSettings(method="exit", gordon_growth=0.025, exit_ebitda_multiple=9.5)
+    expansion = ExpansionSettings(clinics_year1=1, new_clinics_per_year=[0,1,1,1,0,0,0,0,0,0])
+
+    return ModelConfig(
+        name="Medispa Platform (Base Case)",
+        currency="USD",
+        forecast_years=10,
+        corporate_tax_rate=0.26,
+        inflation=0.025,
+        procedure_categories=categories,
+        provider_types=providers,
+        equipment_assets=equipment_assets,
+        fixed_opex=fixed_opex,
+        variable_opex=variable_opex,
+        membership=membership,
+        retail=retail,
+        working_capital=wc,
+        wacc=wacc,
+        terminal=terminal,
+        expansion=expansion,
+        maintenance_capex_pct_of_revenue=0.02,
+        net_debt=1500000.0,
+        cash_minimum=250000.0,
+    )
+
+def _load_config(file: str) -> ModelConfig:
+    with open(file, "r") as f:
+        data = json.load(f)
+    # Convert dicts back to dataclasses
+    def to_dc(dc, cls):
+        if isinstance(dc, cls):
+            return dc
+        if isinstance(dc, dict):
+            return cls(**dc)
+        return dc
+
+    data["procedure_categories"] = [ProcedureCategory(**x) for x in data["procedure_categories"]]
+    data["provider_types"] = [ProviderType(**x) for x in data["provider_types"]]
+    data["equipment_assets"] = [EquipmentAsset(**x) for x in data["equipment_assets"]]
+    data["fixed_opex"] = [FixedExpense(**x) for x in data["fixed_opex"]]
+    data["variable_opex"] = [VariableExpense(**x) for x in data["variable_opex"]]
+    data["membership"] = MembershipSettings(**data["membership"])
+    data["retail"] = RetailSettings(**data["retail"])
+    data["working_capital"] = WorkingCapitalSettings(**data["working_capital"])
+    data["wacc"] = WACCSettings(**data["wacc"])
+    data["terminal"] = TerminalSettings(**data["terminal"])
+    data["expansion"] = ExpansionSettings(**data["expansion"])
+    return ModelConfig(**data)
+
+def _save_config(cfg: ModelConfig, file: str):
+    def d(obj):
+        if hasattr(obj, "__dict__"):
+            return asdict(obj)
+        return obj
+    with open(file, "w") as f:
+        json.dump(asdict(cfg), f, indent=2)
+
+def _banner(title: str):
+    console.print(Panel.fit(Text(title, justify="center", style="bold cyan"), box=box.DOUBLE, style="cyan"))
+
+def _print_summary(rows: List[Dict], meta: Dict, currency: str):
+    tbl = Table(title="Forecast Summary", box=box.SIMPLE_HEAVY)
+    tbl.add_column("Year", justify="right")
+    tbl.add_column("Clinics", justify="right")
+    tbl.add_column(f"Revenue ({currency})", justify="right")
+    tbl.add_column(f"EBITDA ({currency})", justify="right")
+    tbl.add_column(f"EBITDA %", justify="right")
+    tbl.add_column(f"UFCF ({currency})", justify="right")
+    for r in rows:
+        rev = r["total_revenue"]
+        e = r["ebitda"]
+        margin = (e / rev) if rev > 1e-9 else 0.0
+        tbl.add_row(
+            str(r["year"]),
+            str(r["clinics"]),
+            f"{rev:,.0f}",
+            f"{e:,.0f}",
+            f"{margin*100:,.1f}%",
+            f"{r['ufcf']:,.0f}",
+        )
+    console.print(tbl)
+
+    val = Table(title="Valuation", box=box.SIMPLE_HEAVY)
+    val.add_column("Metric")
+    val.add_column("Value")
+    val.add_row("WACC", _pct(meta["wacc"]))
+    val.add_row(f"PV of UFCF ({currency})", f"{meta['pv_flows']:,.0f}")
+    val.add_row(f"PV of Terminal ({currency})", f"{meta['pv_terminal']:,.0f}")
+    val.add_row(f"Enterprise Value ({currency})", f"{meta['enterprise_value']:,.0f}")
+    val.add_row(f"Net Debt ({currency})", f"{cfg.net_debt:,.0f}")
+    val.add_row(f"Equity Value ({currency})", f"{meta['equity_value']:,.0f}")
+    console.print(val)
+
+def _export_csv(rows: List[Dict], path: str):
+    # Minimal CSV writer (no pandas dependency)
+    import csv
+    keys = list(rows[0].keys())
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    console.print(f"[green]Exported forecast to[/green] {path}")
+
+# ------------- CLI Commands ------------- #
+
+@app.command()
+def init(file: str = typer.Option("config.json", help="Path to save starter config")):
+    "Create a high-quality starter Base Case config."
+    cfg = _sample_config()
+    _save_config(cfg, file)
+    _banner("Medispa Valuation CLI")
+    console.print(f"Starter config written to [bold]{file}[/bold].")
+    console.print("Run:  python medispa_valuation_cli.py wizard --file config.json  to customize.")
+
+@app.command()
+def wizard(file: str = typer.Option("config.json", help="Config file to update")):
+    "Interactive wizard to tweak key drivers quickly."
+    cfg = _load_config(file)
+    _banner("Medispa Valuation Wizard")
+
+    cfg.name = Prompt.ask("Model name", default=cfg.name)
+    cfg.currency = Prompt.ask("Currency", default=cfg.currency)
+    cfg.forecast_years = IntPrompt.ask("Forecast years", default=cfg.forecast_years)
+
+    # WACC quick edit
+    console.print(Panel("WACC quick settings (CAPM with premiums)", title="WACC", style="blue"))
+    w = cfg.wacc
+    w.risk_free_rate = FloatPrompt.ask("Risk-free rate", default=w.risk_free_rate)
+    w.equity_risk_premium = FloatPrompt.ask("Equity risk premium", default=w.equity_risk_premium)
+    w.beta = FloatPrompt.ask("Beta", default=w.beta)
+    w.size_premium = FloatPrompt.ask("Size premium", default=w.size_premium)
+    w.specific_risk = FloatPrompt.ask("Specific/company risk", default=w.specific_risk)
+    w.pre_tax_cost_of_debt = FloatPrompt.ask("Pre-tax cost of debt", default=w.pre_tax_cost_of_debt)
+    w.target_debt_to_total_cap = FloatPrompt.ask("Target Debt / (Debt+Equity)", default=w.target_debt_to_total_cap)
+    w.tax_rate = FloatPrompt.ask("Tax rate for WACC calc", default=w.tax_rate)
+    cfg.corporate_tax_rate = FloatPrompt.ask("Corporate tax rate (for NOPAT)", default=cfg.corporate_tax_rate)
+
+    # Terminal
+    console.print(Panel("Terminal Value", title="Terminal", style="blue"))
+    method = Prompt.ask("Terminal method [gordon/exit]", choices=["gordon", "exit"], default=cfg.terminal.method)
+    cfg.terminal.method = method
+    if method == "gordon":
+        cfg.terminal.gordon_growth = FloatPrompt.ask("Gordon perpetual growth", default=cfg.terminal.gordon_growth)
+    else:
+        cfg.terminal.exit_ebitda_multiple = FloatPrompt.ask("Exit EBITDA multiple", default=cfg.terminal.exit_ebitda_multiple)
+
+    # Expansion
+    console.print(Panel("Expansion (multi-clinic)", title="Expansion", style="blue"))
+    cfg.expansion.clinics_year1 = IntPrompt.ask("Clinics in Year 1", default=cfg.expansion.clinics_year1)
+    # Simple uniform plan
+    add_each = IntPrompt.ask("Add new clinics each year (0..n)", default=0)
+    cfg.expansion.new_clinics_per_year = [add_each for _ in range(cfg.forecast_years)]
+
+    # Membership
+    console.print(Panel("Membership Program", title="Membership", style="blue"))
+    cfg.membership.monthly_fee = FloatPrompt.ask("Monthly fee", default=cfg.membership.monthly_fee)
+    cfg.membership.members_per_clinic_year1 = IntPrompt.ask("Members per clinic (Y1)", default=cfg.membership.members_per_clinic_year1)
+    cfg.membership.members_growth = FloatPrompt.ask("Members growth (annual)", default=cfg.membership.members_growth)
+    cfg.membership.annual_churn = FloatPrompt.ask("Members annual churn", default=cfg.membership.annual_churn)
+
+    # Leverage and other
+    cfg.net_debt = FloatPrompt.ask("Net debt (for equity bridge)", default=cfg.net_debt)
+
+    _save_config(cfg, file)
+    console.print(f"[green]Saved updates to[/green] {file}.")
+
+@app.command()
+def run(file: str = typer.Option("config.json", help="Config file"),
+        export: Optional[str] = typer.Option(None, help="Export forecast CSV path")):
+    "Run the DCF and print a full forecast/valuation summary."
+    cfg = _load_config(file)
+    _banner("Medispa Valuation - Run")
+    model = ValuationModel(cfg)
+    rows, meta = model.run_forecast()
+    _print_summary(rows, meta, cfg.currency)
+    if export:
+        _export_csv(rows, export)
+
+@app.command()
+def sensitivity(file: str = typer.Option("config.json", help="Config file")):
+    "One-way sensitivity (tornado) on key drivers."
+    cfg = _load_config(file)
+    base_model = ValuationModel(cfg)
+    base_rows, base_meta = base_model.run_forecast()
+    base_ev = base_meta["enterprise_value"]
+
+    def run_with(mutator):
+        c = json.loads(json.dumps(asdict(cfg)))
+        # manual apply mutation to dict then back to ModelConfig
+        mutator(c)
+        # rebuild
+        mc = _load_config_obj(c)
+        m = ValuationModel(mc)
+        _, mt = m.run_forecast()
+        return mt["enterprise_value"]
+
+    # Define sensitivities (low, high)
+    sens = [
+        ("WACC", lambda c,v: _set_wacc(c, v),  base_model.wacc()*0.8, base_model.wacc()*1.2),
+        ("Exit Multiple", lambda c,v: _set_exit(c, v), cfg.terminal.exit_ebitda_multiple*0.8, cfg.terminal.exit_ebitda_multiple*1.2),
+        ("Injector Utilization", lambda c,v: _set_util(c,"Injector (NP/PA/RN)", v), 0.65, 0.90),
+        ("Injector Commission (Injectables)", lambda c,v: _set_comm(c,"Injector (NP/PA/RN)","Injectables", v), 0.25, 0.40),
+        ("Marketing % Rev", lambda c,v: _set_varpct(c,"Marketing", v), 0.05, 0.12),
+        ("Injectables Price Inflation", lambda c,v: _set_cat_infl(c,"Injectables", v), 0.01, 0.05),
+    ]
+
+    # Compute deltas
+    bars = []
+    for name, mut, low, high in sens:
+        lo_ev = run_with(lambda cc: mut(cc, low))
+        hi_ev = run_with(lambda cc: mut(cc, high))
+        bars.append((name, lo_ev, hi_ev))
+
+    # Print tornado
+    console.print(Panel("Enterprise Value Sensitivity (Tornado)", style="magenta"))
+    max_width = 40
+    for name, lo, hi in bars:
+        lo_delta = lo - base_ev
+        hi_delta = hi - base_ev
+        lo_blocks = int(abs(lo_delta) / max(1, abs(hi_delta) + abs(lo_delta)) * max_width)
+        hi_blocks = int(abs(hi_delta) / max(1, abs(hi_delta) + abs(lo_delta)) * max_width)
+        line = f"{name:35s} | "
+        line += f"[red]{'<'*lo_blocks}[/red]"
+        line += f"[green]{'>'*hi_blocks}[/green]"
+        line += f"   [dim](Base EV {cfg.currency} {base_ev:,.0f} | Low {lo:,.0f} | High {hi:,.0f})[/dim]"
+        console.print(line)
+
+def _load_config_obj(cdict: Dict) -> ModelConfig:
+    cdict["procedure_categories"] = [ProcedureCategory(**x) for x in cdict["procedure_categories"]]
+    cdict["provider_types"] = [ProviderType(**x) for x in cdict["provider_types"]]
+    cdict["equipment_assets"] = [EquipmentAsset(**x) for x in cdict["equipment_assets"]]
+    cdict["fixed_opex"] = [FixedExpense(**x) for x in cdict["fixed_opex"]]
+    cdict["variable_opex"] = [VariableExpense(**x) for x in cdict["variable_opex"]]
+    cdict["membership"] = MembershipSettings(**cdict["membership"])
+    cdict["retail"] = RetailSettings(**cdict["retail"])
+    cdict["working_capital"] = WorkingCapitalSettings(**cdict["working_capital"])
+    cdict["wacc"] = WACCSettings(**cdict["wacc"])
+    cdict["terminal"] = TerminalSettings(**cdict["terminal"])
+    cdict["expansion"] = ExpansionSettings(**cdict["expansion"])
+    return ModelConfig(**cdict)
+
+def _set_wacc(cdict: Dict, new_wacc: float):
+    # Adjust specific_risk to hit desired WACC roughly
+    w = cdict["wacc"]
+    # simple solve by nudging specific risk
+    wacc_obj = _load_config_obj(cdict)
+    m = ValuationModel(wacc_obj)
+    curr = m.wacc()
+    delta = new_wacc - curr
+    w["specific_risk"] = max(0.0, w["specific_risk"] + delta)
+
+def _set_exit(cdict: Dict, new_mult: float):
+    cdict["terminal"]["method"] = "exit"
+    cdict["terminal"]["exit_ebitda_multiple"] = new_mult
+
+def _set_util(cdict: Dict, provider_name: str, new_util: float):
+    for p in cdict["provider_types"]:
+        if p["name"] == provider_name:
+            p["utilization"] = new_util
+
+def _set_comm(cdict: Dict, provider_name: str, category: str, new_comm: float):
+    for p in cdict["provider_types"]:
+        if p["name"] == provider_name:
+            p["commission_by_category"][category] = new_comm
+
+def _set_varpct(cdict: Dict, var_name: str, new_pct: float):
+    for v in cdict["variable_opex"]:
+        if v["name"] == var_name:
+            v["pct_of_revenue"] = new_pct
+
+def _set_cat_infl(cdict: Dict, cat_name: str, new_infl: float):
+    for c in cdict["procedure_categories"]:
+        if c["name"] == cat_name:
+            c["price_inflation"] = new_infl
+
+@app.command("mc")
+def monte_carlo(
+    file: str = typer.Option("config.json", help="Config file"),
+    iterations: int = typer.Option(2000, help="Number of Monte Carlo runs"),
+    seed: Optional[int] = typer.Option(None, help="Random seed"),
+):
+    "Monte Carlo on key risks (utilization, price, WACC, exit multiple, marketing)."
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+    base = _load_config(file)
+    base_model = ValuationModel(base)
+    _, base_meta = base_model.run_forecast()
+    base_ev = base_meta["enterprise_value"]
+
+    evs = []
+    for _ in range(iterations):
+        c = json.loads(json.dumps(asdict(base)))
+        # Draw distributions (truncated)
+        # WACC ~ N(mu, 75 bps), truncated
+        wacc_draw = np.clip(np.random.normal(loc=base_model.wacc(), scale=0.0075), 0.07, 0.20)
+        _set_wacc(c, float(wacc_draw))
+
+        # Exit multiple ~ N(mu, 1.2x), truncated
+        if c["terminal"]["method"] == "exit":
+            exit_draw = float(np.clip(np.random.normal(loc=c["terminal"]["exit_ebitda_multiple"], scale=1.2), 6.0, 14.0))
+            _set_exit(c, exit_draw)
+
+        # Injector utilization ~ N(0.80, 0.05)
+        util_draw = float(np.clip(np.random.normal(loc=0.80, scale=0.05), 0.60, 0.92))
+        _set_util(c, "Injector (NP/PA/RN)", util_draw)
+
+        # Injectables price inflation ~ N(3%, 1%)
+        infl_draw = float(np.clip(np.random.normal(loc=0.03, scale=0.01), 0.005, 0.06))
+        _set_cat_infl(c, "Injectables", infl_draw)
+
+        # Marketing % revenue ~ N(8%, 1.5%)
+        mkt_draw = float(np.clip(np.random.normal(loc=0.08, scale=0.015), 0.04, 0.14))
+        _set_varpct(c, "Marketing", mkt_draw)
+
+        mc = _load_config_obj(c)
+        m = ValuationModel(mc)
+        _, meta = m.run_forecast()
+        evs.append(meta["enterprise_value"])
+
+    evs = np.array(evs)
+    p5, p50, p95 = np.percentile(evs, [5, 50, 95])
+    _banner("Monte Carlo - Enterprise Value")
+    console.print(f"Base EV: {base_ev:,.0f} {base.currency}")
+    console.print(f"P5  EV: {p5:,.0f}")
+    console.print(f"P50 EV: {p50:,.0f}")
+    console.print(f"P95 EV: {p95:,.0f}")
+    # Simple histogram
+    hist, edges = np.histogram(evs, bins=25)
+    maxh = hist.max()
+    console.print(Panel("EV Distribution", style="magenta"))
+    for h, left, right in zip(hist, edges[:-1], edges[1:]):
+        bar = "█" * int(40 * (h / maxh)) if maxh > 0 else ""
+        console.print(f"{left:,.0f}-{right:,.0f} | {bar}")
+
+if __name__ == "__main__":
+    app()
+```
+
+What’s inside (and why it’s analyst-grade)
+- Bottom-up operating build: Provider capacity by type (FTEs, hours, utilization) feeds minutes by procedure category, converted to procedures via duration; revenue via price paths and inflation. Matching commission logic allocates commission by minute-share per category.
+- Category-level economics: Price inflation, variable material cost per procedure, procedure durations; volume growth parameters.
+- Provider compensation: Base comp plus commission by category; integrated into COGS rather than Opex.
+- P&L and FCF: Full gross margin, EBITDA, depreciation from asset schedule, EBIT, NOPAT, unlevered FCF after capex and working capital.
+- Working capital: AR, inventory, AP via DSO/DIO/DPO; membership deferred revenue.
+- Capex: Explicit assets with straight-line depreciation plus maintenance capex tied to revenue; device maintenance included.
+- Membership and retail: Membership fee dynamics with growth/churn; retail revenue as % of service with explicit gross margin.
+- Multi-clinic roll-up: Set clinics in Year 1 and annual additions; provider and membership scale with clinic-count.
+- WACC: CAPM with beta + size + specific risk; pre-tax cost of debt, tax shield, target leverage; auto-computed.
+- Terminal value: Gordon or exit multiple; both discounted correctly.
+- Sensitivity (tornado): WACC, exit multiple, injector utilization, commission rate, marketing % of revenue, injectables inflation.
+- Monte Carlo: Draws across WACC, exit multiple, utilization, inflation, marketing; returns EV distribution (P5/P50/P95).
+- Clean CLI UX: Rich panels, tables, and histograms; wizard for rapid tuning; export to CSV.
+
+Analyst notes and tips
+- Injectables productivity: If you want to push capacity, raise injector utilization and/or increase injector FTE per clinic, but watch commission creep and saturation effects.
+- Membership: Raising monthly fee or members-per-clinic strongly lifts negative working capital via deferral (if prepaid), but be conservative with churn.
+- Marketing spend: If you prefer a CAC-driven approach, replace VariableExpense("Marketing") with a CAC module (new patient cohorting); current model keeps it % revenue for simplicity and stability.
+- Exit vs. Gordon: For fast-growing roll-ups, exit multiple is common; for mature steady-state clinics, Gordon with 2–3% growth is realistic.
+- Validation: The model emits warnings if provider category mixes exceed 100% or if terminal growth assumptions are unreasonable.
+
+Want me to tailor a sponsor case?
+Share specifics (procedure mix, FTE plan, device roadmap, lease terms, planned de novos/M&A cadence, membership attach, target leverage) and I’ll wire those into a bespoke config and sensitivity pack.

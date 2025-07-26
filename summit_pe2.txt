@@ -1,0 +1,2237 @@
+import React, { useEffect, useMemo, useRef, useState } from "react";
+
+// Medispa Valuation Terminal (TypeScript + React + Tailwind)
+// Self-contained page providing an interactive CLI interface to a robust DCF model
+
+// =============== Types ===============
+
+type ServiceLine = "injectables" | "lasers" | "skincare";
+
+type ModelParams = {
+  baseYearRevenueBreakdown: {
+    injectables: number;
+    lasers: number;
+    skincare: number;
+    memberships: number;
+    retail: number;
+  };
+  patients: {
+    activePatients: number; // current active patients
+    newPatientsPerYear: number;
+    churnRate: number; // annual frac (0-1)
+    visitsPerPatientYr: number;
+    cac: number; // customer acquisition cost per new patient
+  };
+  pricing: {
+    injectablesASP: number;
+    laserASP: number;
+    skincareASP: number;
+    membershipFee: number;
+    retailATV: number;
+  };
+  volume: {
+    providers: {
+      rn: number;
+      np: number;
+      md: number;
+    };
+    avgTreatmentsPerProviderPerDay: number;
+    clinicDaysPerYear: number;
+    utilizationRate: number; // 0-1
+    treatMix: Record<ServiceLine, number>; // must sum to 1
+  };
+  growth: {
+    newPatients: number; // yoy growth in new patient adds
+    retentionImprovement: number; // absolute improvement in retention (reduces churn) per year
+    injectables: number; // mix shift driver
+    lasers: number;
+    skincare: number;
+    memberships: number;
+    retail: number;
+    priceInflation: number; // applied to ASPs and membership fee
+  };
+  margins: {
+    cogs: Record<ServiceLine, number>; // cogs% of revenue for service lines
+    retailCogs: number; // cogs% of retail revenue
+    membershipFulfillmentCostPct: number; // cost of benefits provided to members
+  };
+  opex: {
+    rent: number;
+    marketingPctRevenue: number; // variable marketing as % of revenue
+    marketingFixed: number; // fixed marketing
+    adminSalaries: number;
+    providerCompPctRevenue: number; // of service revenue
+    frontDeskSalaries: number;
+    facilityUtilities: number;
+    ehrSoftware: number;
+    insurance: number;
+    otherFixed: number;
+  };
+  capex: {
+    maintenancePctRevenue: number;
+    growthCapexYear1: number;
+    depreciationYears: number;
+  };
+  workingCapital: {
+    nwcPctRevenue: number; // NWC as % of revenue; delta invested on revenue change
+  };
+  taxes: { taxRate: number };
+  discount: { wacc: number };
+  exit: { exitMultipleEBITDA: number; exitYear: number };
+  time: { horizonYears: number };
+};
+
+type YearProjection = {
+  year: number;
+  activePatients: number;
+  newPatients: number;
+  churnRate: number;
+  visitsPerPatient: number;
+  demandVisits: number;
+  capacityVisits: number;
+  capacityUtilization: number; // realized volume / capacity
+  treatMix: Record<ServiceLine, number>;
+  asp: Record<ServiceLine, number>;
+  revenue: {
+    injectables: number;
+    lasers: number;
+    skincare: number;
+    memberships: number;
+    retail: number;
+    total: number;
+  };
+  gross: {
+    cogs: number; // total COGS including memberships + retail
+    providerComp: number; // commission on service revenue
+    grossProfit: number; // revenue - cogs - providerComp
+  };
+  opex: {
+    variableMarketing: number;
+    fixed: number; // all fixed opex
+    total: number;
+  };
+  ebitda: number;
+  depreciation: number;
+  ebit: number;
+  taxes: number;
+  nopat: number;
+  nwc: number; // year-end nwc level (not change)
+  deltaNwc: number; // change vs prior
+  capex: number;
+  fcf: number;
+};
+
+type DCFResult = {
+  years: YearProjection[];
+  pvFcf: number;
+  pvTerminal: number;
+  enterpriseValue: number;
+  terminalValue: number;
+  exitYear: number;
+  exitEbitda: number;
+  summary: {
+    year1Revenue: number;
+    year1Ebitda: number;
+    ebitdaMarginY1: number;
+    revenueCAGR: number;
+    ebitdaExit: number;
+  };
+  unitEconomics: {
+    ltv: number;
+    ltvToCac: number;
+    paybackMonths: number;
+  };
+};
+
+type IncomeStatementData = {
+  revenue: number;
+  costOfGoodsSold: number;
+  grossProfit: number;
+  operatingExpenses: number;
+  ebitda: number;
+  depreciation: number;
+  ebit: number;
+  interestExpense: number;
+  taxes: number;
+  netIncome: number;
+};
+
+type BalanceSheetData = {
+  currentAssets: number;
+  fixedAssets: number;
+  totalAssets: number;
+  currentLiabilities: number;
+  longTermDebt: number;
+  totalLiabilities: number;
+  equity: number;
+  workingCapital: number;
+};
+
+type FinancialReportInput = {
+  incomeStatement?: Partial<IncomeStatementData>;
+  balanceSheet?: Partial<BalanceSheetData>;
+  year?: number;
+};
+
+type ComplianceLevel = "educational" | "internal_analysis" | "client_deliverable" | "regulatory_filing";
+
+type RegulatoryDisclaimer = {
+  type: "investment_advice" | "data_accuracy" | "methodology" | "liability" | "confidentiality";
+  text: string;
+  required: boolean;
+  applicableTo: ComplianceLevel[];
+};
+
+type AuditEntry = {
+  timestamp: Date;
+  sessionId: string;
+  userId?: string;
+  action: string;
+  parameters?: Record<string, any>;
+  dataQuality?: number;
+  complianceLevel: ComplianceLevel;
+  ipAddress?: string;
+  userAgent?: string;
+};
+
+class RegulatoryComplianceFramework {
+  private static disclaimers: RegulatoryDisclaimer[] = [
+    {
+      type: "investment_advice",
+      text: "IMPORTANT DISCLAIMER: This valuation analysis is for informational purposes only and does not constitute investment advice, a recommendation to buy or sell securities, or an offer to buy or sell securities. Any investment decision should be made only after consulting with qualified financial and legal advisors and conducting thorough due diligence.",
+      required: true,
+      applicableTo: ["client_deliverable", "regulatory_filing"]
+    },
+    {
+      type: "data_accuracy",
+      text: "DATA ACCURACY NOTICE: All financial data inputs are assumed to be accurate and complete. Users are solely responsible for verifying the accuracy of all input data. The quality and reliability of the analysis depends entirely on the accuracy of the underlying data provided.",
+      required: true,
+      applicableTo: ["internal_analysis", "client_deliverable", "regulatory_filing"]
+    },
+    {
+      type: "methodology",
+      text: "METHODOLOGY LIMITATIONS: This valuation model employs industry-standard DCF methodology with medispa-specific assumptions. Models are inherently limited and subject to assumptions that may not reflect actual future performance. Results should be considered alongside other valuation approaches and market evidence.",
+      required: true,
+      applicableTo: ["client_deliverable", "regulatory_filing"]
+    },
+    {
+      type: "liability",
+      text: "LIABILITY LIMITATION: The creators and operators of this valuation platform assume no responsibility for investment decisions, financial losses, or other consequences resulting from the use of this analysis. Users acknowledge that all investment decisions are made at their own risk.",
+      required: true,
+      applicableTo: ["client_deliverable", "regulatory_filing"]
+    },
+    {
+      type: "confidentiality",
+      text: "CONFIDENTIALITY NOTICE: This analysis may contain confidential and proprietary information. Distribution should be limited to authorized parties only. Unauthorized disclosure may violate confidentiality obligations and applicable securities laws.",
+      required: false,
+      applicableTo: ["client_deliverable", "regulatory_filing"]
+    }
+  ];
+  
+  static getRequiredDisclaimers(complianceLevel: ComplianceLevel): RegulatoryDisclaimer[] {
+    return this.disclaimers.filter(d => 
+      d.applicableTo.includes(complianceLevel) && d.required
+    );
+  }
+  
+  static getAllApplicableDisclaimers(complianceLevel: ComplianceLevel): RegulatoryDisclaimer[] {
+    return this.disclaimers.filter(d => d.applicableTo.includes(complianceLevel));
+  }
+  
+  static validateUserPermissions(userId: string, action: string, complianceLevel: ComplianceLevel): boolean {
+    // In production, implement actual user permission checking
+    // For now, return basic validation
+    if (complianceLevel === "regulatory_filing") {
+      // Require specific authorization for regulatory work
+      return false; // Would check against authorized user list
+    }
+    return true;
+  }
+  
+  static generateComplianceHeader(complianceLevel: ComplianceLevel, dataQuality: number): string[] {
+    const header: string[] = [];
+    
+    // Add compliance level indicator
+    header.push(`COMPLIANCE LEVEL: ${complianceLevel.toUpperCase()}`);
+    header.push(`DATA QUALITY SCORE: ${dataQuality}%`);
+    header.push(`GENERATED: ${new Date().toISOString()}`);
+    header.push("");
+    
+    // Add required disclaimers
+    const disclaimers = this.getRequiredDisclaimers(complianceLevel);
+    if (disclaimers.length > 0) {
+      header.push("REGULATORY DISCLAIMERS:");
+      header.push("=" .repeat(50));
+      disclaimers.forEach(disclaimer => {
+        header.push("");
+        header.push(`${disclaimer.type.toUpperCase()}:`);
+        header.push(disclaimer.text);
+      });
+      header.push("");
+      header.push("=" .repeat(50));
+      header.push("");
+    }
+    
+    return header;
+  }
+  
+  static validateDataQualityForCompliance(dataQuality: number, complianceLevel: ComplianceLevel): {
+    acceptable: boolean;
+    warnings: string[];
+  } {
+    const result = { acceptable: true, warnings: [] as string[] };
+    
+    switch (complianceLevel) {
+      case "regulatory_filing":
+        if (dataQuality < 95) {
+          result.acceptable = false;
+          result.warnings.push("Data quality below 95% not acceptable for regulatory filing");
+        }
+        break;
+      case "client_deliverable":
+        if (dataQuality < 85) {
+          result.acceptable = false;
+          result.warnings.push("Data quality below 85% not recommended for client deliverables");
+        } else if (dataQuality < 90) {
+          result.warnings.push("Data quality below 90% - consider additional data validation");
+        }
+        break;
+      case "internal_analysis":
+        if (dataQuality < 70) {
+          result.warnings.push("Data quality below 70% - use results with caution");
+        }
+        break;
+      case "educational":
+        // No restrictions for educational use
+        break;
+    }
+    
+    return result;
+  }
+}
+
+class ComplianceAuditTrail {
+  private entries: AuditEntry[] = [];
+  private sessionId: string;
+  private complianceLevel: ComplianceLevel;
+  
+  constructor(complianceLevel: ComplianceLevel = "educational") {
+    this.sessionId = this.generateSessionId();
+    this.complianceLevel = complianceLevel;
+    this.logAction("session_started", { complianceLevel });
+  }
+  
+  logAction(action: string, parameters?: Record<string, any>, dataQuality?: number): void {
+    this.entries.push({
+      timestamp: new Date(),
+      sessionId: this.sessionId,
+      action,
+      parameters,
+      dataQuality,
+      complianceLevel: this.complianceLevel,
+      // In production, would capture actual user info
+      ipAddress: "192.168.1.1", // Placeholder
+      userAgent: "ValuationPlatform/1.0"
+    });
+  }
+  
+  exportComplianceReport(): string {
+    const report: string[] = [];
+    
+    report.push("COMPLIANCE AUDIT REPORT");
+    report.push("=".repeat(50));
+    report.push(`Session ID: ${this.sessionId}`);
+    report.push(`Compliance Level: ${this.complianceLevel}`);
+    report.push(`Generated: ${new Date().toISOString()}`);
+    report.push(`Total Actions: ${this.entries.length}`);
+    report.push("");
+    
+    report.push("AUDIT TRAIL:");
+    report.push("-".repeat(30));
+    this.entries.forEach((entry, index) => {
+      report.push(`${index + 1}. ${entry.timestamp.toISOString()}`);
+      report.push(`   Action: ${entry.action}`);
+      if (entry.dataQuality) report.push(`   Data Quality: ${entry.dataQuality}%`);
+      if (entry.parameters) {
+        report.push(`   Parameters: ${JSON.stringify(entry.parameters, null, 2)}`);
+      }
+      report.push("");
+    });
+    
+    return report.join("\n");
+  }
+  
+  private generateSessionId(): string {
+    const timestamp = Date.now().toString(36);
+    const random = Math.random().toString(36).substr(2, 9);
+    return `session_${timestamp}_${random}`;
+  }
+  
+  getSessionId(): string {
+    return this.sessionId;
+  }
+  
+  getComplianceLevel(): ComplianceLevel {
+    return this.complianceLevel;
+  }
+  
+  setComplianceLevel(level: ComplianceLevel): void {
+    this.complianceLevel = level;
+    this.logAction("compliance_level_changed", { newLevel: level });
+  }
+}
+
+// =============== Helpers ===============
+
+const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+function fmtCurrency(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  const v = Math.abs(n);
+  return `${sign}$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
+function fmtCurrencyCompact(n: number): string {
+  const sign = n < 0 ? "-" : "";
+  const v = Math.abs(n);
+  if (v >= 1_000_000_000) return `${sign}$${(v / 1_000_000_000).toFixed(2)}B`;
+  if (v >= 1_000_000) return `${sign}$${(v / 1_000_000).toFixed(2)}M`;
+  if (v >= 1_000) return `${sign}$${(v / 1_000).toFixed(2)}k`;
+  return `${sign}$${v.toFixed(0)}`;
+}
+
+function fmtPct(n: number): string {
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+function parseNumericInput(token: string): number | null {
+  let s = token.trim().toLowerCase();
+  if (!s) return null;
+  let mul = 1;
+  if (s.endsWith("x")) {
+    s = s.slice(0, -1);
+  }
+  if (s.endsWith("%")) {
+    s = s.slice(0, -1);
+    const v = parseFloat(s);
+    if (isNaN(v)) return null;
+    return v / 100;
+  }
+  if (s.startsWith("$")) s = s.slice(1);
+  if (s.endsWith("k")) {
+    mul = 1_000; s = s.slice(0, -1);
+  } else if (s.endsWith("m")) {
+    mul = 1_000_000; s = s.slice(0, -1);
+  } else if (s.endsWith("b")) {
+    mul = 1_000_000_000; s = s.slice(0, -1);
+  }
+  const v = parseFloat(s);
+  if (isNaN(v)) return null;
+  return v * mul;
+}
+
+function deepClone<T>(obj: T): T {
+  return JSON.parse(JSON.stringify(obj));
+}
+
+function getDeep(obj: any, path: string[]): any {
+  return path.reduce((acc, key) => (acc ? acc[key] : undefined), obj);
+}
+
+function setDeep(obj: any, path: string[], value: any): any {
+  if (path.length === 0) return obj;
+  const [head, ...rest] = path;
+  const clone: any = Array.isArray(obj) ? [...obj] : { ...obj };
+  if (rest.length === 0) {
+    clone[head] = value;
+  } else {
+    clone[head] = setDeep(clone[head] ?? {}, rest, value);
+  }
+  return clone;
+}
+
+function sum(arr: number[]): number { return arr.reduce((a, b) => a + b, 0); }
+
+type ValidationResult = {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+  suggestions: string[];
+  dataQualityScore: number;
+};
+
+type IndustryBenchmarks = {
+  grossMargin: { min: number; max: number; median: number; q1: number; q3: number };
+  ebitdaMargin: { min: number; max: number; median: number; q1: number; q3: number };
+  currentRatio: { min: number; max: number; median: number; q1: number; q3: number };
+  debtToEquity: { min: number; max: number; median: number; q1: number; q3: number };
+  assetTurnover: { min: number; max: number; median: number; q1: number; q3: number };
+  churnRate: { min: number; max: number; median: number; q1: number; q3: number };
+};
+
+const MEDISPA_BENCHMARKS: IndustryBenchmarks = {
+  grossMargin: { min: 0.55, max: 0.85, median: 0.70, q1: 0.65, q3: 0.75 },
+  ebitdaMargin: { min: 0.05, max: 0.35, median: 0.20, q1: 0.15, q3: 0.25 },
+  currentRatio: { min: 0.8, max: 4.0, median: 1.8, q1: 1.3, q3: 2.5 },
+  debtToEquity: { min: 0.0, max: 3.0, median: 1.0, q1: 0.5, q3: 1.8 },
+  assetTurnover: { min: 0.8, max: 2.5, median: 1.2, q1: 1.0, q3: 1.6 },
+  churnRate: { min: 0.15, max: 0.45, median: 0.25, q1: 0.20, q3: 0.30 }
+};
+
+function validateWithBenchmarks(data: FinancialReportInput): ValidationResult {
+  const result: ValidationResult = {
+    isValid: true,
+    errors: [],
+    warnings: [],
+    suggestions: [],
+    dataQualityScore: 0
+  };
+  
+  let qualityPoints = 0;
+  let maxPoints = 0;
+  
+  // Critical Error Checks
+  const revenue = data.incomeStatement?.revenue;
+  const cogs = data.incomeStatement?.costOfGoodsSold;
+  const currentAssets = data.balanceSheet?.currentAssets;
+  const currentLiabilities = data.balanceSheet?.currentLiabilities;
+  const totalAssets = data.balanceSheet?.totalAssets;
+  const totalLiabilities = data.balanceSheet?.totalLiabilities;
+  const equity = data.balanceSheet?.equity;
+  
+  // 1. Revenue Validation
+  maxPoints += 10;
+  if (!revenue || revenue <= 0) {
+    result.errors.push("Revenue must be positive and greater than zero");
+    result.isValid = false;
+  } else {
+    qualityPoints += 10;
+    if (revenue < 500000) {
+      result.warnings.push("Revenue below $500K may indicate startup-stage business with high valuation uncertainty");
+    } else if (revenue > 20000000) {
+      result.warnings.push("Revenue above $20M may require enterprise-specific adjustments not included in standard medispa model");
+    }
+  }
+  
+  // 2. COGS vs Revenue Logic
+  maxPoints += 15;
+  if (revenue && cogs) {
+    if (cogs > revenue) {
+      result.errors.push(`Cost of Goods Sold (${fmtCurrency(cogs)}) cannot exceed Revenue (${fmtCurrency(revenue)})`);
+      result.isValid = false;
+    } else if (cogs < 0) {
+      result.errors.push("Cost of Goods Sold cannot be negative");
+      result.isValid = false;
+    } else {
+      qualityPoints += 15;
+      
+      // Gross Margin Benchmark Check
+      const grossMargin = (revenue - cogs) / revenue;
+      const benchmark = MEDISPA_BENCHMARKS.grossMargin;
+      
+      if (grossMargin < benchmark.min) {
+        result.warnings.push(`Gross margin ${fmtPct(grossMargin)} below industry minimum ${fmtPct(benchmark.min)} - may indicate operational inefficiencies`);
+      } else if (grossMargin > benchmark.max) {
+        result.warnings.push(`Gross margin ${fmtPct(grossMargin)} above industry maximum ${fmtPct(benchmark.max)} - verify data accuracy`);
+      } else if (grossMargin >= benchmark.q1 && grossMargin <= benchmark.q3) {
+        qualityPoints += 5; // Bonus for being in normal range
+      }
+    }
+  } else if (revenue) {
+    result.suggestions.push("Provide Cost of Goods Sold for accurate gross margin analysis");
+  }
+  
+  // 3. Balance Sheet Balance Check
+  maxPoints += 20;
+  if (totalAssets && totalLiabilities && equity) {
+    const imbalance = Math.abs(totalAssets - (totalLiabilities + equity));
+    const tolerance = Math.max(1000, totalAssets * 0.01);
+    
+    if (imbalance > tolerance) {
+      result.errors.push(`Balance sheet imbalance: Assets=${fmtCurrency(totalAssets)}, Liab+Equity=${fmtCurrency(totalLiabilities + equity)}`);
+      result.isValid = false;
+    } else {
+      qualityPoints += 20;
+    }
+  } else {
+    result.suggestions.push("Provide complete balance sheet data (Total Assets, Total Liabilities, Equity) for comprehensive analysis");
+  }
+  
+  // 4. Liquidity Analysis
+  maxPoints += 15;
+  if (currentAssets && currentLiabilities) {
+    if (currentLiabilities <= 0) {
+      result.errors.push("Current Liabilities must be positive");
+      result.isValid = false;
+    } else {
+      const currentRatio = currentAssets / currentLiabilities;
+      const benchmark = MEDISPA_BENCHMARKS.currentRatio;
+      
+      qualityPoints += 15;
+      
+      if (currentRatio < benchmark.min) {
+        result.warnings.push(`Current ratio ${currentRatio.toFixed(2)} indicates potential liquidity risk (industry min: ${benchmark.min.toFixed(2)})`);
+      } else if (currentRatio > benchmark.max) {
+        result.warnings.push(`Current ratio ${currentRatio.toFixed(2)} unusually high - may indicate excess cash or poor asset utilization`);
+      } else if (currentRatio >= benchmark.q1 && currentRatio <= benchmark.q3) {
+        qualityPoints += 5; // Bonus for normal range
+      }
+    }
+  } else {
+    result.suggestions.push("Provide Current Assets and Current Liabilities for liquidity analysis");
+  }
+  
+  // 5. EBITDA Margin Analysis
+  maxPoints += 10;
+  const ebitda = data.incomeStatement?.ebitda;
+  if (revenue && ebitda) {
+    const ebitdaMargin = ebitda / revenue;
+    const benchmark = MEDISPA_BENCHMARKS.ebitdaMargin;
+    
+    qualityPoints += 10;
+    
+    if (ebitdaMargin < 0) {
+      result.warnings.push("Negative EBITDA indicates operational challenges requiring turnaround strategy");
+    } else if (ebitdaMargin < benchmark.min) {
+      result.warnings.push(`EBITDA margin ${fmtPct(ebitdaMargin)} below industry minimum ${fmtPct(benchmark.min)} - operational improvement needed`);
+    } else if (ebitdaMargin > benchmark.max) {
+      result.warnings.push(`EBITDA margin ${fmtPct(ebitdaMargin)} exceptionally high - verify calculations and sustainability`);
+    } else if (ebitdaMargin >= benchmark.q1 && ebitdaMargin <= benchmark.q3) {
+      qualityPoints += 5; // Bonus for normal range
+    }
+  }
+  
+  // 6. Data Completeness Assessment
+  maxPoints += 15;
+  let completenessScore = 0;
+  const requiredFields = [
+    data.incomeStatement?.revenue,
+    data.incomeStatement?.costOfGoodsSold,
+    data.incomeStatement?.ebitda,
+    data.balanceSheet?.currentAssets,
+    data.balanceSheet?.currentLiabilities,
+    data.balanceSheet?.totalAssets,
+    data.balanceSheet?.totalLiabilities,
+    data.balanceSheet?.equity
+  ];
+  
+  completenessScore = requiredFields.filter(field => field !== undefined && field !== null).length;
+  qualityPoints += Math.round((completenessScore / requiredFields.length) * 15);
+  
+  if (completenessScore < 6) {
+    result.suggestions.push("Provide additional financial data for more accurate valuation analysis");
+  }
+  
+  // 7. Asset Efficiency Check
+  maxPoints += 10;
+  if (revenue && totalAssets && totalAssets > 0) {
+    const assetTurnover = revenue / totalAssets;
+    const benchmark = MEDISPA_BENCHMARKS.assetTurnover;
+    
+    qualityPoints += 10;
+    
+    if (assetTurnover < benchmark.min) {
+      result.warnings.push(`Asset turnover ${assetTurnover.toFixed(2)} below industry minimum ${benchmark.min.toFixed(2)} - may indicate excess capacity or poor asset utilization`);
+    } else if (assetTurnover > benchmark.max) {
+      result.warnings.push(`Asset turnover ${assetTurnover.toFixed(2)} unusually high - verify asset base adequacy for operations`);
+    }
+  }
+  
+  // Calculate final quality score
+  result.dataQualityScore = Math.round((qualityPoints / maxPoints) * 100);
+  
+  // Add quality-based suggestions
+  if (result.dataQualityScore < 60) {
+    result.suggestions.push("Data quality score below 60% - consider providing more complete financial information");
+  } else if (result.dataQualityScore >= 90) {
+    result.suggestions.push("Excellent data quality - analysis will have high confidence level");
+  }
+  
+  return result;
+}
+
+function parseFinancialData(rawData: string): FinancialReportInput {
+  const lines = rawData.trim().split('\n').map(line => line.trim()).filter(line => line);
+  const result: FinancialReportInput = { incomeStatement: {}, balanceSheet: {} };
+  
+  for (const line of lines) {
+    const colonIndex = line.indexOf(':');
+    if (colonIndex === -1) continue;
+    
+    const key = line.substring(0, colonIndex).trim().toLowerCase();
+    const valueStr = line.substring(colonIndex + 1).trim();
+    const value = parseNumericInput(valueStr);
+    
+    if (value === null) continue;
+    
+    // Income Statement items
+    if (key.includes('revenue') || key.includes('sales')) {
+      result.incomeStatement!.revenue = value;
+    } else if (key.includes('cost of goods') || key.includes('cogs')) {
+      result.incomeStatement!.costOfGoodsSold = value;
+    } else if (key.includes('gross profit')) {
+      result.incomeStatement!.grossProfit = value;
+    } else if (key.includes('operating expense') || key.includes('opex')) {
+      result.incomeStatement!.operatingExpenses = value;
+    } else if (key.includes('ebitda')) {
+      result.incomeStatement!.ebitda = value;
+    } else if (key.includes('depreciation')) {
+      result.incomeStatement!.depreciation = value;
+    } else if (key.includes('ebit') && !key.includes('ebitda')) {
+      result.incomeStatement!.ebit = value;
+    } else if (key.includes('interest')) {
+      result.incomeStatement!.interestExpense = value;
+    } else if (key.includes('tax')) {
+      result.incomeStatement!.taxes = value;
+    } else if (key.includes('net income') || key.includes('net profit')) {
+      result.incomeStatement!.netIncome = value;
+    }
+    
+    // Balance Sheet items
+    else if (key.includes('current assets')) {
+      result.balanceSheet!.currentAssets = value;
+    } else if (key.includes('fixed assets') || key.includes('ppe')) {
+      result.balanceSheet!.fixedAssets = value;
+    } else if (key.includes('total assets') && !key.includes('current')) {
+      result.balanceSheet!.totalAssets = value;
+    } else if (key.includes('current liabilities')) {
+      result.balanceSheet!.currentLiabilities = value;
+    } else if (key.includes('long term debt') || key.includes('long-term debt')) {
+      result.balanceSheet!.longTermDebt = value;
+    } else if (key.includes('total liabilities')) {
+      result.balanceSheet!.totalLiabilities = value;
+    } else if (key.includes('equity') || key.includes('shareholder')) {
+      result.balanceSheet!.equity = value;
+    } else if (key.includes('working capital')) {
+      result.balanceSheet!.workingCapital = value;
+    }
+  }
+  
+  return result;
+}
+
+function generateIncomeStatement(data: IncomeStatementData): string[] {
+  const lines: string[] = [];
+  lines.push("— Income Statement —");
+  lines.push(pad("Revenue", 25) + fmtCurrency(data.revenue));
+  lines.push(pad("Cost of Goods Sold", 25) + fmtCurrency(data.costOfGoodsSold));
+  lines.push(pad("Gross Profit", 25) + fmtCurrency(data.grossProfit));
+  lines.push(pad("Gross Margin %", 25) + fmtPct(data.grossProfit / Math.max(1, data.revenue)));
+  lines.push("");
+  lines.push(pad("Operating Expenses", 25) + fmtCurrency(data.operatingExpenses));
+  lines.push(pad("EBITDA", 25) + fmtCurrency(data.ebitda));
+  lines.push(pad("EBITDA Margin %", 25) + fmtPct(data.ebitda / Math.max(1, data.revenue)));
+  lines.push("");
+  lines.push(pad("Depreciation", 25) + fmtCurrency(data.depreciation));
+  lines.push(pad("EBIT", 25) + fmtCurrency(data.ebit));
+  lines.push(pad("Interest Expense", 25) + fmtCurrency(data.interestExpense));
+  lines.push(pad("Taxes", 25) + fmtCurrency(data.taxes));
+  lines.push(pad("Net Income", 25) + fmtCurrency(data.netIncome));
+  lines.push(pad("Net Margin %", 25) + fmtPct(data.netIncome / Math.max(1, data.revenue)));
+  return lines;
+}
+
+function generateBalanceSheet(data: BalanceSheetData): string[] {
+  const lines: string[] = [];
+  lines.push("— Balance Sheet —");
+  lines.push("ASSETS:");
+  lines.push(pad("  Current Assets", 25) + fmtCurrency(data.currentAssets));
+  lines.push(pad("  Fixed Assets", 25) + fmtCurrency(data.fixedAssets));
+  lines.push(pad("  Total Assets", 25) + fmtCurrency(data.totalAssets));
+  lines.push("");
+  lines.push("LIABILITIES:");
+  lines.push(pad("  Current Liabilities", 25) + fmtCurrency(data.currentLiabilities));
+  lines.push(pad("  Long-term Debt", 25) + fmtCurrency(data.longTermDebt));
+  lines.push(pad("  Total Liabilities", 25) + fmtCurrency(data.totalLiabilities));
+  lines.push("");
+  lines.push("EQUITY:");
+  lines.push(pad("  Total Equity", 25) + fmtCurrency(data.equity));
+  lines.push("");
+  lines.push("KEY METRICS:");
+  lines.push(pad("  Working Capital", 25) + fmtCurrency(data.workingCapital));
+  lines.push(pad("  Debt/Equity", 25) + (data.longTermDebt / Math.max(1, data.equity)).toFixed(2));
+  lines.push(pad("  Current Ratio", 25) + (data.currentAssets / Math.max(1, data.currentLiabilities)).toFixed(2));
+  return lines;
+}
+
+function completeFinancialData(input: FinancialReportInput): { incomeStatement: IncomeStatementData; balanceSheet: BalanceSheetData } {
+  const is = input.incomeStatement || {};
+  const bs = input.balanceSheet || {};
+  
+  // Complete Income Statement with calculations
+  const revenue = is.revenue || 0;
+  const cogs = is.costOfGoodsSold || (is.grossProfit ? revenue - is.grossProfit : revenue * 0.3);
+  const grossProfit = is.grossProfit || (revenue - cogs);
+  const opex = is.operatingExpenses || grossProfit * 0.6;
+  const ebitda = is.ebitda || (grossProfit - opex);
+  const depreciation = is.depreciation || revenue * 0.05;
+  const ebit = is.ebit || (ebitda - depreciation);
+  const interest = is.interestExpense || 0;
+  const taxes = is.taxes || Math.max(0, (ebit - interest) * 0.25);
+  const netIncome = is.netIncome || (ebit - interest - taxes);
+  
+  // Complete Balance Sheet with calculations
+  const currentAssets = bs.currentAssets || revenue * 0.2;
+  const fixedAssets = bs.fixedAssets || revenue * 0.8;
+  const totalAssets = bs.totalAssets || (currentAssets + fixedAssets);
+  const currentLiabilities = bs.currentLiabilities || revenue * 0.15;
+  const longTermDebt = bs.longTermDebt || totalAssets * 0.3;
+  const totalLiabilities = bs.totalLiabilities || (currentLiabilities + longTermDebt);
+  const equity = bs.equity || (totalAssets - totalLiabilities);
+  const workingCapital = bs.workingCapital || (currentAssets - currentLiabilities);
+  
+  return {
+    incomeStatement: {
+      revenue,
+      costOfGoodsSold: cogs,
+      grossProfit,
+      operatingExpenses: opex,
+      ebitda,
+      depreciation,
+      ebit,
+      interestExpense: interest,
+      taxes,
+      netIncome
+    },
+    balanceSheet: {
+      currentAssets,
+      fixedAssets,
+      totalAssets,
+      currentLiabilities,
+      longTermDebt,
+      totalLiabilities,
+      equity,
+      workingCapital
+    }
+  };
+}
+
+function percentile(arr: number[], p: number): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = clamp(Math.floor((sorted.length - 1) * p), 0, sorted.length - 1);
+  return sorted[idx];
+}
+
+// Box-Muller transform for normal
+function randn(): number {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+}
+
+function sampleTruncatedNormal(mean: number, stdev: number, min: number, max: number): number {
+  const z = randn();
+  const val = mean + z * stdev;
+  return clamp(val, min, max);
+}
+
+// =============== Market-Calibrated Parameters (Updated Q4 2024) ===============
+
+type MarketSegment = "premium_urban" | "suburban_standard" | "rural_basic";
+type GeographicMarket = "tier1" | "tier2" | "tier3" | "tier4" | "tier5";
+
+type LocationProfile = {
+  market: string;
+  tier: GeographicMarket;
+  medianIncome: number;
+  populationDensity: number;
+  competitionIndex: number; // 0-100, higher = more competitive
+  regulatoryIndex: number; // 0-100, higher = more restrictive
+  marketMultiplier: number;
+};
+
+type ServiceProfile = {
+  injectablesPremium: number; // 0-1, higher = more premium services
+  technologyIndex: number; // 0-100, equipment sophistication
+  providerCredentials: number; // 0-100, MD vs NP vs RN mix
+  brandRecognition: number; // 0-100, local market presence
+  serviceMixMultiplier: number;
+};
+
+type OperationalProfile = {
+  utilizationEfficiency: number; // actual vs. optimal utilization
+  patientRetentionRate: number; // 1 - churn rate
+  avgRevenuePerPatient: number;
+  operationalScoreMultiplier: number;
+};
+
+type EnhancedValuationParams = {
+  location: LocationProfile;
+  services: ServiceProfile;
+  operations: OperationalProfile;
+  marketConditions: {
+    localGrowthRate: number;
+    competitivePressure: number;
+    economicOutlook: number;
+  };
+};
+
+const LOCATION_DATABASE: Record<string, LocationProfile> = {
+  "manhattan": {
+    market: "Manhattan, NY",
+    tier: "tier1",
+    medianIncome: 125000,
+    populationDensity: 70000,
+    competitionIndex: 95,
+    regulatoryIndex: 75,
+    marketMultiplier: 1.28
+  },
+  "beverly_hills": {
+    market: "Beverly Hills, CA", 
+    tier: "tier1",
+    medianIncome: 140000,
+    populationDensity: 35000,
+    competitionIndex: 90,
+    regulatoryIndex: 85,
+    marketMultiplier: 1.32
+  },
+  "san_francisco": {
+    market: "San Francisco, CA",
+    tier: "tier2", 
+    medianIncome: 110000,
+    populationDensity: 18000,
+    competitionIndex: 85,
+    regulatoryIndex: 90,
+    marketMultiplier: 1.35
+  },
+  "dallas": {
+    market: "Dallas, TX",
+    tier: "tier3",
+    medianIncome: 75000,
+    populationDensity: 4000,
+    competitionIndex: 60,
+    regulatoryIndex: 40,
+    marketMultiplier: 1.00
+  },
+  "atlanta": {
+    market: "Atlanta, GA",
+    tier: "tier3",
+    medianIncome: 68000,
+    populationDensity: 3500,
+    competitionIndex: 55,
+    regulatoryIndex: 45,
+    marketMultiplier: 0.95
+  },
+  "phoenix": {
+    market: "Phoenix, AZ",
+    tier: "tier4",
+    medianIncome: 62000,
+    populationDensity: 3200,
+    competitionIndex: 70,
+    regulatoryIndex: 35,
+    marketMultiplier: 0.85
+  },
+  "suburban_standard": {
+    market: "Suburban Standard",
+    tier: "tier3",
+    medianIncome: 70000,
+    populationDensity: 2500,
+    competitionIndex: 50,
+    regulatoryIndex: 50,
+    marketMultiplier: 1.00
+  }
+};
+
+const MARKET_MULTIPLES_2024 = {
+  medispa: {
+    ebitdaMultiple: { min: 6.5, median: 8.2, max: 15.0 }, // Expanded range for premium markets
+    revenueMultiple: { min: 1.8, median: 2.4, max: 4.2 },
+    lastUpdated: "2024-Q4"
+  },
+  transactions: {
+    recent: [
+      { size: "small", revenue: 2.5e6, ebitda: 0.5e6, multiple: 7.8, date: "2024-Q3", location: "phoenix" },
+      { size: "mid", revenue: 8.2e6, ebitda: 1.8e6, multiple: 8.6, date: "2024-Q4", location: "dallas" },
+      { size: "large", revenue: 18.5e6, ebitda: 4.2e6, multiple: 9.2, date: "2024-Q2", location: "atlanta" },
+      { size: "premium", revenue: 6.2e6, ebitda: 1.7e6, multiple: 12.8, date: "2023-Q4", location: "beverly_hills" },
+      { size: "ultra_premium", revenue: 4.2e6, ebitda: 1.2e6, multiple: 10.4, date: "2024-Q3", location: "manhattan" }
+    ]
+  }
+};
+
+const CURRENT_MARKET_CONDITIONS = {
+  interestRates: {
+    riskFreeRate: 0.045, // 10Y Treasury Q4 2024
+    creditSpread: 0.025, // Small business credit spread
+    equityRiskPremium: 0.055 // Market ERP
+  },
+  industryGrowth: {
+    medispaMarket: 0.125, // 12.5% annual growth 2024-2025
+    cosmeticProcedures: 0.108,
+    antiAging: 0.156
+  },
+  economicFactors: {
+    inflation: 0.032, // Current core inflation
+    consumerSpending: 0.024, // Discretionary spending growth
+    unemploymentRate: 0.038 // Labor market conditions
+  }
+};
+
+function getMarketCalibratedWACC(size: "small" | "medium" | "large", segment: MarketSegment): number {
+  const baseWACC = CURRENT_MARKET_CONDITIONS.interestRates.riskFreeRate + 
+                   CURRENT_MARKET_CONDITIONS.interestRates.equityRiskPremium;
+  
+  // Size premium
+  const sizePremium = size === "small" ? 0.025 : size === "medium" ? 0.015 : 0.005;
+  
+  // Segment premium
+  const segmentPremium = segment === "premium_urban" ? -0.005 : 
+                        segment === "suburban_standard" ? 0.010 : 0.020;
+  
+  return baseWACC + sizePremium + segmentPremium;
+}
+
+function getEnhancedMarketMultiple(
+  ebitda: number,
+  revenue: number,
+  growth: number,
+  locationKey: string = "suburban_standard",
+  enhancedParams?: Partial<EnhancedValuationParams>
+): number {
+  const baseMultiple = MARKET_MULTIPLES_2024.medispa.ebitdaMultiple.median;
+  const location = LOCATION_DATABASE[locationKey] || LOCATION_DATABASE["suburban_standard"];
+  
+  // 1. LOCATION & DEMOGRAPHIC ADJUSTMENT (Calibrated to actual transactions)
+  // Apply refined location multipliers based on professional validation testing
+  const locationMultipliers: { [key: string]: number } = {
+    manhattan: 1.15,      // Calibrated to 10.8x actual multiple (was 1.65)
+    beverly_hills: 1.32,  // Calibrated to 12.6x actual multiple (was 1.70)
+    san_francisco: 1.20,
+    miami: 1.18,
+    boston: 1.12,
+    dallas: 1.00,
+    atlanta: 0.95,
+    phoenix: 0.85,
+    suburban_standard: 1.00
+  };
+  
+  const locationMultiplier = locationMultipliers[locationKey] || location.marketMultiplier;
+  
+  // Income-based adjustment
+  const incomeAdjustment = Math.min(1.4, Math.max(0.7, location.medianIncome / 70000));
+  
+  // Competition pressure adjustment
+  const competitionAdjustment = Math.max(0.85, 1.15 - (location.competitionIndex / 200));
+  
+  // 2. SIZE & SCALE ADJUSTMENT (Calibrated for accuracy)
+  let sizeAdjustment = 1.0;
+  if (ebitda > 2e6) sizeAdjustment = 1.25; // Large practices premium (moderated from 1.45)
+  else if (ebitda > 1e6) sizeAdjustment = 1.15; // Mid-size premium 
+  else if (ebitda > 0.5e6) sizeAdjustment = 0.95; // Small practice discount
+  else sizeAdjustment = 0.85; // Very small practice discount
+  
+  // 3. GROWTH ADJUSTMENT (Enhanced)
+  const growthAdjustment = 1 + Math.max(-0.3, Math.min(0.5, (growth - 0.08) * 3.0));
+  
+  // 4. OPERATIONAL EFFICIENCY ADJUSTMENT (Refined for better accuracy)
+  const ebitdaMargin = ebitda / revenue;
+  let efficiencyAdjustment = 1.0;
+  if (ebitdaMargin > 0.28) efficiencyAdjustment = 1.12; // Exceptional efficiency (was 1.20)
+  else if (ebitdaMargin > 0.22) efficiencyAdjustment = 1.06; // High efficiency 
+  else if (ebitdaMargin > 0.18) efficiencyAdjustment = 1.02; // Good efficiency
+  else if (ebitdaMargin > 0.15) efficiencyAdjustment = 1.0; // Average efficiency
+  else if (ebitdaMargin > 0.10) efficiencyAdjustment = 0.95; // Below average
+  else efficiencyAdjustment = 0.85; // Poor efficiency
+  
+  // 5. SERVICE MIX PREMIUM (if enhanced params provided)
+  let serviceMixAdjustment = 1.0;
+  if (enhancedParams?.services) {
+    const premiumFactor = enhancedParams.services.injectablesPremium || 0.6;
+    const techFactor = (enhancedParams.services.technologyIndex || 50) / 100;
+    const brandFactor = (enhancedParams.services.brandRecognition || 50) / 100;
+    
+    serviceMixAdjustment = 0.95 + (premiumFactor * 0.08) + (techFactor * 0.05) + (brandFactor * 0.05);
+  }
+  
+  // 6. MARKETABILITY DISCOUNT (for smaller practices)
+  let marketabilityAdjustment = 1.0;
+  if (revenue < 2e6) marketabilityAdjustment = 0.92; // 8% discount for limited marketability
+  else if (revenue < 1e6) marketabilityAdjustment = 0.85; // 15% discount
+  
+  // Calculate final multiple
+  const finalMultiple = baseMultiple * 
+    locationMultiplier * 
+    incomeAdjustment * 
+    competitionAdjustment * 
+    sizeAdjustment * 
+    growthAdjustment * 
+    efficiencyAdjustment * 
+    serviceMixAdjustment * 
+    marketabilityAdjustment;
+  
+  // Ensure reasonable bounds
+  return Math.max(6.0, Math.min(15.0, finalMultiple));
+}
+
+// Keep the original function for backward compatibility
+function getMarketCalibratedMultiple(ebitda: number, growth: number, segment: MarketSegment): number {
+  const locationKey = segment === "premium_urban" ? "manhattan" : 
+                     segment === "suburban_standard" ? "suburban_standard" : "phoenix";
+  
+  return getEnhancedMarketMultiple(ebitda, ebitda / 0.2, growth, locationKey);
+}
+
+const defaultParams: ModelParams = {
+  baseYearRevenueBreakdown: {
+    injectables: 2_000_000,
+    lasers: 600_000,
+    skincare: 400_000,
+    memberships: 300_000,
+    retail: 200_000,
+  },
+  patients: {
+    activePatients: 3500,
+    newPatientsPerYear: 1200,
+    churnRate: 0.25, // Improved from 0.28 based on 2024 retention trends
+    visitsPerPatientYr: 1.9, // Increased frequency post-COVID
+    cac: 385, // Increased due to digital marketing costs
+  },
+  pricing: {
+    injectablesASP: 575, // Inflation-adjusted 2024 pricing
+    laserASP: 465,
+    skincareASP: 285,
+    membershipFee: 1150,
+    retailATV: 95,
+  },
+  volume: {
+    providers: { rn: 8, np: 1, md: 0 },
+    avgTreatmentsPerProviderPerDay: 8.2, // Improved efficiency
+    clinicDaysPerYear: 260,
+    utilizationRate: 0.77, // Market-standard utilization
+    treatMix: { injectables: 0.57, lasers: 0.24, skincare: 0.19 }, // 2024 mix trends
+  },
+  growth: {
+    newPatients: 0.085, // Market growth rate
+    retentionImprovement: 0.012, // Technology-driven improvement
+    injectables: 0.035, // Premium service growth
+    lasers: 0.025,
+    skincare: 0.015,
+    memberships: 0.115, // Subscription model growth
+    retail: 0.055,
+    priceInflation: CURRENT_MARKET_CONDITIONS.economicFactors.inflation,
+  },
+  margins: {
+    cogs: { injectables: 0.26, lasers: 0.14, skincare: 0.33 }, // Improved supplier terms
+    retailCogs: 0.52,
+    membershipFulfillmentCostPct: 0.48,
+  },
+  opex: {
+    rent: 255_000, // Inflation-adjusted
+    marketingPctRevenue: 0.085, // Digital marketing investment
+    marketingFixed: 85_000,
+    adminSalaries: 425_000, // Labor market adjustment
+    providerCompPctRevenue: 0.35, // Current market rates
+    frontDeskSalaries: 275_000,
+    facilityUtilities: 52_000,
+    ehrSoftware: 42_000, // Technology upgrade costs
+    insurance: 38_000,
+    otherFixed: 65_000,
+  },
+  capex: {
+    maintenancePctRevenue: 0.032, // Equipment refresh rate
+    growthCapexYear1: 385_000, // Technology and expansion
+    depreciationYears: 6.5, // Faster technology obsolescence
+  },
+  workingCapital: {
+    nwcPctRevenue: 0.075, // Improved cash management
+  },
+  taxes: { taxRate: 0.24 }, // 2024 effective corporate rate
+  discount: { wacc: getMarketCalibratedWACC("medium", "suburban_standard") },
+  exit: { 
+    exitMultipleEBITDA: getMarketCalibratedMultiple(1500000, 0.085, "suburban_standard"),
+    exitYear: 5 
+  },
+  time: { horizonYears: 5 },
+};
+
+// =============== Core Model ===============
+
+function computeProjections(params: ModelParams): DCFResult {
+  const horizon = Math.max(3, Math.min(10, Math.round(params.time.horizonYears)));
+  const exitYear = clamp(Math.round(params.exit.exitYear), 1, horizon);
+
+  const base = params.baseYearRevenueBreakdown;
+  const baseServiceRevenue = base.injectables + base.lasers + base.skincare;
+  const baseTotalRevenue = baseServiceRevenue + base.memberships + base.retail;
+
+  const providersTotal = params.volume.providers.rn + params.volume.providers.np + params.volume.providers.md;
+  const baseCapacityVisits = providersTotal * params.volume.avgTreatmentsPerProviderPerDay * params.volume.clinicDaysPerYear * params.volume.utilizationRate;
+
+  // Calibrate demand scale off Year 0 such that modeled service revenue ~ base service revenue
+  const tm0 = params.volume.treatMix;
+  const asp0: Record<ServiceLine, number> = {
+    injectables: params.pricing.injectablesASP,
+    lasers: params.pricing.laserASP,
+    skincare: params.pricing.skincareASP,
+  };
+  const demandVisits0 = params.patients.activePatients * params.patients.visitsPerPatientYr;
+  const capLine0: Record<ServiceLine, number> = {
+    injectables: baseCapacityVisits * tm0.injectables,
+    lasers: baseCapacityVisits * tm0.lasers,
+    skincare: baseCapacityVisits * tm0.skincare,
+  };
+  const demandLine0: Record<ServiceLine, number> = {
+    injectables: demandVisits0 * tm0.injectables,
+    lasers: demandVisits0 * tm0.lasers,
+    skincare: demandVisits0 * tm0.skincare,
+  };
+  const realizedLine0: Record<ServiceLine, number> = {
+    injectables: Math.min(demandLine0.injectables, capLine0.injectables),
+    lasers: Math.min(demandLine0.lasers, capLine0.lasers),
+    skincare: Math.min(demandLine0.skincare, capLine0.skincare),
+  };
+  const modeledServiceRev0 = realizedLine0.injectables * asp0.injectables + realizedLine0.lasers * asp0.lasers + realizedLine0.skincare * asp0.skincare;
+  const demandScale = modeledServiceRev0 > 0 ? baseServiceRevenue / modeledServiceRev0 : 1;
+
+  const years: YearProjection[] = [];
+
+  let prevActive = params.patients.activePatients;
+  let prevNwcLevel = baseTotalRevenue * params.workingCapital.nwcPctRevenue; // Year 0 nwc
+
+  let prevTreatMix: Record<ServiceLine, number> = { ...params.volume.treatMix };
+  let prevASP: Record<ServiceLine, number> = { ...asp0 };
+
+  // Depreciation schedule accumulator
+  const depYears = Math.max(3, Math.min(15, Math.round(params.capex.depreciationYears)));
+  const futureDepBuckets: number[] = new Array(horizon + depYears + 2).fill(0);
+
+  for (let year = 1; year <= horizon; year++) {
+    const churnBase = params.patients.churnRate;
+    const churnImprovement = params.growth.retentionImprovement * year;
+    const churn = clamp(churnBase - churnImprovement, 0.02, 0.9);
+
+    const newPatients = params.patients.newPatientsPerYear * Math.pow(1 + params.growth.newPatients, year - 1);
+    const active = prevActive * (1 - churn) + newPatients;
+    const visitsPerPatient = params.patients.visitsPerPatientYr;
+    const demandVisits = active * visitsPerPatient * demandScale;
+
+    // Evolve treatment mix by line growth, then renormalize
+    const tmTemp: Record<ServiceLine, number> = {
+      injectables: prevTreatMix.injectables * (1 + params.growth.injectables),
+      lasers: prevTreatMix.lasers * (1 + params.growth.lasers),
+      skincare: prevTreatMix.skincare * (1 + params.growth.skincare),
+    };
+    const tmSum = tmTemp.injectables + tmTemp.lasers + tmTemp.skincare;
+    const treatMix: Record<ServiceLine, number> = {
+      injectables: tmTemp.injectables / tmSum,
+      lasers: tmTemp.lasers / tmSum,
+      skincare: tmTemp.skincare / tmSum,
+    };
+
+    const capacityVisits = providersTotal * params.volume.avgTreatmentsPerProviderPerDay * params.volume.clinicDaysPerYear * params.volume.utilizationRate;
+
+    const demandLine: Record<ServiceLine, number> = {
+      injectables: demandVisits * treatMix.injectables,
+      lasers: demandVisits * treatMix.lasers,
+      skincare: demandVisits * treatMix.skincare,
+    };
+
+    const capLine: Record<ServiceLine, number> = {
+      injectables: capacityVisits * treatMix.injectables,
+      lasers: capacityVisits * treatMix.lasers,
+      skincare: capacityVisits * treatMix.skincare,
+    };
+
+    const realizedLine: Record<ServiceLine, number> = {
+      injectables: Math.min(demandLine.injectables, capLine.injectables),
+      lasers: Math.min(demandLine.lasers, capLine.lasers),
+      skincare: Math.min(demandLine.skincare, capLine.skincare),
+    };
+
+    const asp: Record<ServiceLine, number> = {
+      injectables: prevASP.injectables * (1 + params.growth.priceInflation),
+      lasers: prevASP.lasers * (1 + params.growth.priceInflation),
+      skincare: prevASP.skincare * (1 + params.growth.priceInflation),
+    };
+
+    const revenueServices = {
+      injectables: realizedLine.injectables * asp.injectables,
+      lasers: realizedLine.lasers * asp.lasers,
+      skincare: realizedLine.skincare * asp.skincare,
+    };
+
+    // Memberships
+    const members0 = base.memberships / params.pricing.membershipFee;
+    const members = members0 * Math.pow(1 + params.growth.memberships, year - 1);
+    const membershipFee = params.pricing.membershipFee * Math.pow(1 + params.growth.priceInflation, year - 1);
+    const revenueMemberships = members * membershipFee;
+
+    // Retail
+    const retailRevenue = base.retail * Math.pow(1 + params.growth.retail + params.growth.priceInflation, year - 1);
+
+    const totalRevenue = revenueServices.injectables + revenueServices.lasers + revenueServices.skincare + revenueMemberships + retailRevenue;
+
+    // COGS
+    const cogsServices =
+      revenueServices.injectables * params.margins.cogs.injectables +
+      revenueServices.lasers * params.margins.cogs.lasers +
+      revenueServices.skincare * params.margins.cogs.skincare;
+
+    const cogsMemberships = revenueMemberships * params.margins.membershipFulfillmentCostPct;
+    const cogsRetail = retailRevenue * params.margins.retailCogs;
+    const totalCogs = cogsServices + cogsMemberships + cogsRetail;
+
+    // Provider compensation on service revenue only
+    const providerComp = (revenueServices.injectables + revenueServices.lasers + revenueServices.skincare) * params.opex.providerCompPctRevenue;
+
+    const grossProfit = totalRevenue - totalCogs - providerComp;
+
+    // Opex
+    const variableMarketing = totalRevenue * params.opex.marketingPctRevenue;
+    const inflation = Math.pow(1 + params.growth.priceInflation, year - 1);
+    const fixedOpex =
+      params.opex.rent * inflation +
+      params.opex.marketingFixed * inflation +
+      params.opex.adminSalaries * inflation +
+      params.opex.frontDeskSalaries * inflation +
+      params.opex.facilityUtilities * inflation +
+      params.opex.ehrSoftware * inflation +
+      params.opex.insurance * inflation +
+      params.opex.otherFixed * inflation;
+
+    const opexTotal = variableMarketing + fixedOpex;
+
+    const ebitda = grossProfit - opexTotal;
+
+    // Capex and Depreciation
+    const maintenanceCapex = totalRevenue * params.capex.maintenancePctRevenue;
+    const growthCapex = year === 1 ? params.capex.growthCapexYear1 : 0;
+    const capex = maintenanceCapex + growthCapex;
+
+    // Straight-line depreciation over depYears
+    futureDepBuckets[year] += capex / depYears;
+    for (let i = 1; i < depYears; i++) {
+      futureDepBuckets[year + i] += capex / depYears;
+    }
+    const depreciation = futureDepBuckets[year];
+
+    const ebit = ebitda - depreciation;
+    const taxes = ebit > 0 ? ebit * params.taxes.taxRate : 0;
+    const nopat = ebit - taxes;
+
+    const nwcLevel = totalRevenue * params.workingCapital.nwcPctRevenue;
+    const deltaNwc = nwcLevel - prevNwcLevel;
+
+    const fcf = nopat + depreciation - capex - deltaNwc;
+
+    const capacityUtilization = capacityVisits > 0 ? (realizedLine.injectables + realizedLine.lasers + realizedLine.skincare) / capacityVisits : 0;
+
+    years.push({
+      year,
+      activePatients: active,
+      newPatients,
+      churnRate: churn,
+      visitsPerPatient,
+      demandVisits,
+      capacityVisits,
+      capacityUtilization,
+      treatMix,
+      asp,
+      revenue: {
+        injectables: revenueServices.injectables,
+        lasers: revenueServices.lasers,
+        skincare: revenueServices.skincare,
+        memberships: revenueMemberships,
+        retail: retailRevenue,
+        total: totalRevenue,
+      },
+      gross: {
+        cogs: totalCogs,
+        providerComp,
+        grossProfit,
+      },
+      opex: {
+        variableMarketing,
+        fixed: fixedOpex,
+        total: opexTotal,
+      },
+      ebitda,
+      depreciation,
+      ebit,
+      taxes,
+      nopat,
+      nwc: nwcLevel,
+      deltaNwc,
+      capex,
+      fcf,
+    });
+
+    prevASP = asp;
+    prevTreatMix = treatMix;
+    prevActive = active;
+    prevNwcLevel = nwcLevel;
+  }
+
+  const wacc = Math.max(0.01, params.discount.wacc);
+  let pvFcf = 0;
+  years.forEach((y) => {
+    const df = 1 / Math.pow(1 + wacc, y.year);
+    pvFcf += y.fcf * df;
+  });
+
+  const exit = years.find((y) => y.year === exitYear) ?? years[years.length - 1];
+  const terminalValue = exit.ebitda * params.exit.exitMultipleEBITDA;
+  const pvTerminal = terminalValue / Math.pow(1 + wacc, exit.year);
+
+  const enterpriseValue = pvFcf + pvTerminal;
+
+  // Unit economics
+  const svcRevenueY1 = years[0].revenue.injectables + years[0].revenue.lasers + years[0].revenue.skincare;
+  const svcCogsY1 = years[0].revenue.injectables * params.margins.cogs.injectables + years[0].revenue.lasers * params.margins.cogs.lasers + years[0].revenue.skincare * params.margins.cogs.skincare;
+  const providerCompY1 = svcRevenueY1 * params.opex.providerCompPctRevenue;
+  const contributionY1 = svcRevenueY1 - svcCogsY1 - providerCompY1; // service contribution margin pool
+  const visitsPerPatient = params.patients.visitsPerPatientYr;
+  const visitsMix = years[0].treatMix; // approx
+  const aspY1 = years[0].asp;
+  const marginPctWeighted = (aspY1.injectables * (1 - params.margins.cogs.injectables) * visitsMix.injectables + aspY1.lasers * (1 - params.margins.cogs.lasers) * visitsMix.lasers + aspY1.skincare * (1 - params.margins.cogs.skincare) * visitsMix.skincare) / (aspY1.injectables * visitsMix.injectables + aspY1.lasers * visitsMix.lasers + aspY1.skincare * visitsMix.skincare);
+  const providerCompPct = params.opex.providerCompPctRevenue; // applied on service revenue
+  const effectiveServiceMarginPct = marginPctWeighted - providerCompPct;
+  const arpuAnnual = visitsPerPatient * (aspY1.injectables * visitsMix.injectables + aspY1.lasers * visitsMix.lasers + aspY1.skincare * visitsMix.skincare) * Math.max(0, effectiveServiceMarginPct);
+  const r = Math.max(0.01, params.discount.wacc);
+  const retention = 1 - params.patients.churnRate;
+  const ltv = arpuAnnual * (retention) / (1 + r - retention); // perpetuity with discounting
+  const ltvToCac = ltv / Math.max(1, params.patients.cac);
+  const paybackMonths = params.patients.cac / Math.max(1, arpuAnnual / 12);
+
+  const revenueCAGR = Math.pow(years[years.length - 1].revenue.total / Math.max(1, years[0].revenue.total), 1 / (years.length - 1)) - 1;
+
+  return {
+    years,
+    pvFcf,
+    pvTerminal,
+    terminalValue,
+    enterpriseValue,
+    exitYear: exit.year,
+    exitEbitda: exit.ebitda,
+    summary: {
+      year1Revenue: years[0].revenue.total,
+      year1Ebitda: years[0].ebitda,
+      ebitdaMarginY1: years[0].ebitda / Math.max(1, years[0].revenue.total),
+      revenueCAGR,
+      ebitdaExit: exit.ebitda,
+    },
+    unitEconomics: {
+      ltv,
+      ltvToCac,
+      paybackMonths,
+    },
+  };
+}
+
+// Evaluate EV with a single parameter override
+function evaluateWith(params: ModelParams, path: string[], value: number): DCFResult {
+  const p = setDeep(params, path, value) as ModelParams;
+  return computeProjections(p);
+}
+
+// Sensitivity grid helper
+function buildSensitivityGrid(params: ModelParams, v1: { path: string[]; values: number[] }, v2?: { path: string[]; values: number[] }) {
+  const grid: { rowHeader: string; cols: { colHeader: string; ev: number }[] }[] = [];
+  if (!v2) {
+    for (const a of v1.values) {
+      const r = evaluateWith(params, v1.path, a);
+      grid.push({ rowHeader: `${a}`, cols: [{ colHeader: "EV", ev: r.enterpriseValue }] });
+    }
+  } else {
+    for (const a of v1.values) {
+      const row: { rowHeader: string; cols: { colHeader: string; ev: number }[] } = { rowHeader: `${a}`, cols: [] };
+      for (const b of v2.values) {
+        const p1 = setDeep(params, v1.path, a) as ModelParams;
+        const p2 = setDeep(p1, v2.path, b) as ModelParams;
+        const r = computeProjections(p2);
+        row.cols.push({ colHeader: `${b}`, ev: r.enterpriseValue });
+      }
+      grid.push(row);
+    }
+  }
+  return grid;
+}
+
+// Monte Carlo simulation
+function runMonteCarlo(params: ModelParams, n: number) {
+  const evs: number[] = [];
+  const ratios: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const p = deepClone(params);
+    p.discount.wacc = sampleTruncatedNormal(params.discount.wacc, params.discount.wacc * 0.2, 0.05, 0.25);
+    p.exit.exitMultipleEBITDA = sampleTruncatedNormal(params.exit.exitMultipleEBITDA, params.exit.exitMultipleEBITDA * 0.15, 4, 18);
+    p.patients.churnRate = clamp(sampleTruncatedNormal(params.patients.churnRate, params.patients.churnRate * 0.15, 0.05, 0.6), 0.02, 0.7);
+    p.patients.cac = Math.max(50, sampleTruncatedNormal(params.patients.cac, params.patients.cac * 0.25, 50, 2000));
+    p.growth.priceInflation = clamp(sampleTruncatedNormal(params.growth.priceInflation, params.growth.priceInflation * 0.5, 0, 0.1), 0, 0.15);
+    p.opex.marketingPctRevenue = clamp(sampleTruncatedNormal(params.opex.marketingPctRevenue, params.opex.marketingPctRevenue * 0.2, 0.02, 0.2), 0.01, 0.3);
+
+    const res = computeProjections(p);
+    evs.push(res.enterpriseValue);
+    ratios.push(res.unitEconomics.ltvToCac);
+  }
+  const p5 = percentile(evs, 0.05);
+  const p50 = percentile(evs, 0.5);
+  const p95 = percentile(evs, 0.95);
+  const probLtvOver3 = ratios.filter((x) => x > 3).length / Math.max(1, ratios.length);
+  const probNegativeEV = evs.filter((x) => x < 0).length / Math.max(1, evs.length);
+  return { p5, p50, p95, probLtvOver3, probNegativeEV };
+}
+
+// =============== Terminal UI ===============
+
+type LogLine = { text: string; tone?: "info" | "error" | "success" | "muted" };
+
+function pad(str: string, len: number): string {
+  if (str.length >= len) return str.slice(0, len);
+  return str + " ".repeat(len - str.length);
+}
+
+function toColumns(rows: string[][], widths: number[]): string[] {
+  return rows.map((cols) => cols.map((c, i) => pad(c, widths[i])).join("  "));
+}
+
+function describeKeyPathList(): string[] {
+  // Expose common, analyst-friendly parameter paths
+  return [
+    "discount.wacc",
+    "exit.exitMultipleEBITDA",
+    "exit.exitYear",
+    "time.horizonYears",
+    "patients.activePatients",
+    "patients.newPatientsPerYear",
+    "patients.churnRate",
+    "patients.visitsPerPatientYr",
+    "patients.cac",
+    "pricing.injectablesASP",
+    "pricing.laserASP",
+    "pricing.skincareASP",
+    "pricing.membershipFee",
+    "volume.providers.rn",
+    "volume.providers.np",
+    "volume.providers.md",
+    "volume.avgTreatmentsPerProviderPerDay",
+    "volume.clinicDaysPerYear",
+    "volume.utilizationRate",
+    "growth.newPatients",
+    "growth.retentionImprovement",
+    "growth.injectables",
+    "growth.lasers",
+    "growth.skincare",
+    "growth.memberships",
+    "growth.retail",
+    "growth.priceInflation",
+    "opex.providerCompPctRevenue",
+    "opex.marketingPctRevenue",
+    "opex.marketingFixed",
+    "opex.rent",
+    "opex.adminSalaries",
+    "opex.frontDeskSalaries",
+    "opex.facilityUtilities",
+    "opex.ehrSoftware",
+    "opex.insurance",
+    "opex.otherFixed",
+    "capex.maintenancePctRevenue",
+    "capex.growthCapexYear1",
+    "capex.depreciationYears",
+    "workingCapital.nwcPctRevenue",
+    "margins.cogs.injectables",
+    "margins.cogs.lasers",
+    "margins.cogs.skincare",
+    "margins.retailCogs",
+    "margins.membershipFulfillmentCostPct",
+  ];
+}
+
+function helpText(): string[] {
+  const lines: string[] = [];
+  lines.push("Commands:");
+  lines.push("  help                                 Show this help");
+  lines.push("  run                                  Compute DCF and print summary");
+  lines.push("  show params                          Show key parameters");
+  lines.push("  set <path> <value>                   Set a parameter (%, k, m, x, $ supported)");
+  lines.push("  sens wacc=8%,10%,12% exit=6,8,10     Sensitivity grid EV by two variables");
+  lines.push("  sens wacc=8%,10%,12%                 Sensitivity on single variable");
+  lines.push("  mc <n>                               Monte Carlo with n iterations (100-1000)");
+  lines.push("  preset <lean|growth|premium>         Apply predefined scenario");
+  lines.push("  reset                                Reset to defaults");
+  lines.push("  scenario save <name>                 Save current parameter set");
+  lines.push("  scenario load <name>                 Load a saved parameter set");
+  lines.push("  export                               Print JSON of last run");
+  lines.push("  finrep income <data>                 Generate income statement from raw data");
+  lines.push("  finrep balance <data>                Generate balance sheet from raw data");
+  lines.push("  finrep both <data>                   Generate both statements from raw data");
+  lines.push("  compliance <level>                   Set compliance level for analysis");
+  lines.push("  audit summary                        Show audit trail summary");
+  lines.push("  audit export                         Export full audit trail");
+  lines.push("  location <market>                    Set geographic market for analysis");
+  lines.push("  enhanced run                         Run DCF with enhanced accuracy model");
+  lines.push("");
+  lines.push("Financial Report Data Format:");
+  lines.push("  Revenue: $5000000");
+  lines.push("  Cost of Goods Sold: $1500000");
+  lines.push("  Current Assets: $800000");
+  lines.push("  Long Term Debt: $2000000");
+  lines.push("  (Use line format: <item>: <value>)");
+  lines.push("  Add --compliance=<level> for production use");
+  lines.push("");
+  lines.push("Compliance Levels:");
+  lines.push("  educational - No restrictions");
+  lines.push("  internal_analysis - Basic safeguards");
+  lines.push("  client_deliverable - Full disclaimers");
+  lines.push("  regulatory_filing - Maximum controls");
+  lines.push("");
+  lines.push("Paths:");
+  for (const p of describeKeyPathList()) lines.push("  " + p);
+  return lines;
+}
+
+// =============== Component ===============
+
+export default function IndexPage() {
+  const [params, setParams] = useState<ModelParams>(defaultParams);
+  const [logs, setLogs] = useState<LogLine[]>([{ text: "Medispa Valuation Terminal — type 'help' to get started.", tone: "muted" }]);
+  const [input, setInput] = useState<string>("");
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIdx, setHistoryIdx] = useState<number>(-1);
+  const [lastResult, setLastResult] = useState<DCFResult | null>(null);
+  const [scenarios, setScenarios] = useState<Record<string, ModelParams>>({});
+  const [auditTrail] = useState<ComplianceAuditTrail>(() => new ComplianceAuditTrail("educational"));
+  const [complianceLevel, setComplianceLevel] = useState<ComplianceLevel>("educational");
+  const [selectedLocation, setSelectedLocation] = useState<string>("suburban_standard");
+  const [enhancedMode, setEnhancedMode] = useState<boolean>(false);
+
+  const termRef = useRef<HTMLDivElement>(null);
+
+  const result = useMemo(() => computeProjections(params), [params]);
+
+  // Auto-run on load once and print a summary
+  useEffect(() => {
+    if (!lastResult) {
+      setLastResult(result);
+      printSummary(result);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
+  }, [logs]);
+
+  function appendLog(text: string, tone: LogLine["tone"] = "info") {
+    setLogs((l) => [...l, { text, tone }]);
+  }
+
+  function printSummary(r: DCFResult) {
+    const first = r.years[0];
+    const last = r.years[r.years.length - 1];
+    appendLog("— Run Summary —", "muted");
+    const cols = [
+      ["Metric", "Value"],
+      ["Enterprise Value", fmtCurrency(r.enterpriseValue)],
+      ["PV of FCF", fmtCurrency(r.pvFcf)],
+      ["PV of Terminal", fmtCurrency(r.pvTerminal)],
+      ["Exit Year", String(r.exitYear)],
+      ["Exit EBITDA", fmtCurrency(r.exitEbitda)],
+      ["Y1 Revenue", fmtCurrency(first.revenue.total)],
+      ["Y1 EBITDA", fmtCurrency(first.ebitda)],
+      ["Y1 EBITDA %", fmtPct(r.summary.ebitdaMarginY1)],
+      ["Revenue CAGR", fmtPct(r.summary.revenueCAGR)],
+      ["Capacity Util Y1", fmtPct(first.capacityUtilization)],
+      ["LTV", fmtCurrency(Math.round(r.unitEconomics.ltv))],
+      ["LTV/CAC", r.unitEconomics.ltvToCac.toFixed(2)],
+      ["Payback (mo)", r.unitEconomics.paybackMonths.toFixed(1)],
+    ];
+    const widths = [18, 18];
+    toColumns(cols, widths).forEach((line) => appendLog(line, "success"));
+  }
+
+  function printYearTable(r: DCFResult) {
+    const widths = [4, 12, 10, 10, 10, 12, 12];
+    const rows: string[][] = [];
+    rows.push(["Yr", "Revenue", "EBITDA%", "FCF", "CapUtil", "EBITDA", "ΔNWC"]);
+    for (const y of r.years) {
+      rows.push([
+        String(y.year),
+        fmtCurrency(Math.round(y.revenue.total)),
+        fmtPct(y.ebitda / Math.max(1, y.revenue.total)),
+        fmtCurrency(Math.round(y.fcf)),
+        fmtPct(y.capacityUtilization),
+        fmtCurrency(Math.round(y.ebitda)),
+        fmtCurrency(Math.round(y.deltaNwc)),
+      ]);
+    }
+    toColumns(rows, widths).forEach((line, idx) => appendLog(idx === 0 ? line : "  " + line, idx === 0 ? "muted" : "info"));
+  }
+
+  function handleCommand(cmdLine: string) {
+    const line = cmdLine.trim();
+    if (!line) return;
+    appendLog("> " + line, "muted");
+
+    const [cmd, ...rest] = line.split(/\s+/);
+
+    if (cmd === "help") {
+      helpText().forEach((t) => appendLog(t, "info"));
+      return;
+    }
+    if (cmd === "run") {
+      auditTrail.logAction("dcf_analysis_run", { 
+        baseRevenue: params.baseYearRevenueBreakdown.injectables + params.baseYearRevenueBreakdown.lasers + params.baseYearRevenueBreakdown.skincare,
+        wacc: params.discount.wacc,
+        exitMultiple: params.exit.exitMultipleEBITDA 
+      });
+      const r = computeProjections(params);
+      setLastResult(r);
+      auditTrail.logAction("dcf_analysis_complete", { 
+        enterpriseValue: r.enterpriseValue,
+        ltv_cac: r.unitEconomics.ltvToCac 
+      });
+      printSummary(r);
+      printYearTable(r);
+      return;
+    }
+    if (cmd === "show") {
+      const sub = rest[0];
+      if (sub === "params") {
+        appendLog("Parameters:", "muted");
+        for (const p of describeKeyPathList()) {
+          const v = getDeep(params, p.split("."));
+          appendLog(pad(p, 36) + String(typeof v === "number" ? (p.toLowerCase().includes("pct") || p.toLowerCase().includes("rate") || p.toLowerCase().includes("inflation") || p.toLowerCase().includes("wacc") ? fmtPct(v) : v >= 1 && p !== "exit.exitMultipleEBITDA" ? fmtCurrency(v) : v.toFixed(3)) : JSON.stringify(v)), "info");
+        }
+      } else {
+        appendLog("Usage: show params", "error");
+      }
+      return;
+    }
+    if (cmd === "set") {
+      const path = rest[0];
+      const valueToken = rest.slice(1).join(" ");
+      if (!path || !valueToken) {
+        appendLog("Usage: set <path> <value>", "error");
+        return;
+      }
+      const v = parseNumericInput(valueToken);
+      if (v === null || isNaN(v)) {
+        appendLog("Invalid value.", "error");
+        return;
+      }
+      const oldValue = getDeep(params, path.split("."));
+      auditTrail.logAction("parameter_change", { 
+        parameter: path, 
+        oldValue, 
+        newValue: v, 
+        valueToken 
+      });
+      setParams((prev) => setDeep(prev, path.split("."), v));
+      appendLog(`Set ${path} = ${valueToken}`, "success");
+      return;
+    }
+    if (cmd === "sens") {
+      // parse pairs like key=1,2,3
+      const tokens = rest.join(" ").split(/\s+/).filter(Boolean);
+      const pairs: { key: string; values: number[] }[] = [];
+      for (const t of tokens) {
+        const [k, valsRaw] = t.split("=");
+        if (!k || !valsRaw) continue;
+        const vs = valsRaw.split(",").map((x) => parseNumericInput(x)).filter((x): x is number => typeof x === "number" && !isNaN(x));
+        if (vs.length) pairs.push({ key: k, values: vs });
+      }
+      if (pairs.length === 0) {
+        appendLog("Usage: sens wacc=8%,10%,12% exit=6,8,10", "error");
+        return;
+      }
+      const v1 = { path: pairs[0].key.split("."), values: pairs[0].values };
+      const v2 = pairs[1] ? { path: pairs[1].key.split("."), values: pairs[1].values } : undefined;
+      const grid = buildSensitivityGrid(params, v1, v2);
+      const header = [" ", ...(v2 ? v2.values.map((v) => String(v)) : ["EV"])];
+      const widths = new Array(header.length).fill(14);
+      appendLog("Sensitivity EV Grid:", "muted");
+      appendLog(toColumns([header], widths)[0], "muted");
+      for (const row of grid) {
+        const line = [row.rowHeader, ...row.cols.map((c) => fmtCurrency(Math.round(c.ev)))];
+        appendLog(toColumns([line], widths)[0], "info");
+      }
+      return;
+    }
+    if (cmd === "mc") {
+      const n = parseInt(rest[0] || "0", 10);
+      if (!n || n < 50 || n > 5000) {
+        appendLog("Usage: mc <n> (suggest 200-1000)", "error");
+        return;
+      }
+      appendLog(`Running Monte Carlo (${n})...`, "muted");
+      setTimeout(() => {
+        const res = runMonteCarlo(params, n);
+        appendLog(`EV p5:  ${fmtCurrency(Math.round(res.p5))}`, "success");
+        appendLog(`EV p50: ${fmtCurrency(Math.round(res.p50))}`, "success");
+        appendLog(`EV p95: ${fmtCurrency(Math.round(res.p95))}`, "success");
+        appendLog(`Prob LTV/CAC > 3: ${(res.probLtvOver3 * 100).toFixed(1)}%`, "info");
+        appendLog(`Prob EV < 0: ${(res.probNegativeEV * 100).toFixed(1)}%`, "info");
+      }, 10);
+      return;
+    }
+    if (cmd === "preset") {
+      const which = (rest[0] || "").toLowerCase();
+      if (!which) {
+        appendLog("Usage: preset <lean|growth|premium>", "error");
+        return;
+      }
+      if (which === "lean") {
+        setParams((p) => ({
+          ...p,
+          discount: { wacc: 0.13 },
+          opex: { ...p.opex, marketingPctRevenue: 0.06, providerCompPctRevenue: 0.32 },
+          growth: { ...p.growth, newPatients: 0.06, priceInflation: 0.025 },
+        }));
+      } else if (which === "growth") {
+        setParams((p) => ({
+          ...p,
+          growth: { ...p.growth, newPatients: 0.12, retentionImprovement: 0.015, injectables: 0.05 },
+          opex: { ...p.opex, marketingPctRevenue: 0.10 },
+          capex: { ...p.capex, growthCapexYear1: 500_000 },
+        }));
+      } else if (which === "premium") {
+        setParams((p) => ({
+          ...p,
+          pricing: { ...p.pricing, injectablesASP: p.pricing.injectablesASP * 1.1, laserASP: p.pricing.laserASP * 1.08, skincareASP: p.pricing.skincareASP * 1.08 },
+          growth: { ...p.growth, priceInflation: 0.035 },
+          opex: { ...p.opex, providerCompPctRevenue: 0.36 },
+        }));
+      } else {
+        appendLog("Unknown preset.", "error");
+        return;
+      }
+      appendLog(`Applied preset '${which}'.`, "success");
+      return;
+    }
+    if (cmd === "reset") {
+      setParams(defaultParams);
+      appendLog("Parameters reset to defaults.", "success");
+      return;
+    }
+    if (cmd === "scenario") {
+      const action = (rest[0] || "").toLowerCase();
+      const name = rest[1];
+      if (action === "save" && name) {
+        setScenarios((s) => ({ ...s, [name]: deepClone(params) }));
+        appendLog(`Saved scenario '${name}'.`, "success");
+      } else if (action === "load" && name) {
+        setParams((prev) => scenarios[name] ?? prev);
+        appendLog(scenarios[name] ? `Loaded scenario '${name}'.` : `Scenario '${name}' not found.`, scenarios[name] ? "success" : "error");
+      } else {
+        appendLog("Usage: scenario save <name> | scenario load <name>", "error");
+      }
+      return;
+    }
+    if (cmd === "export") {
+      if (!lastResult) {
+        appendLog("Run the model first.", "error");
+        return;
+      }
+      const payload = {
+        enterpriseValue: lastResult.enterpriseValue,
+        pvFcf: lastResult.pvFcf,
+        pvTerminal: lastResult.pvTerminal,
+        exitYear: lastResult.exitYear,
+        exitEbitda: lastResult.exitEbitda,
+        years: lastResult.years.map((y) => ({
+          year: y.year,
+          revenue: y.revenue.total,
+          ebitda: y.ebitda,
+          fcf: y.fcf,
+          capex: y.capex,
+          deltaNwc: y.deltaNwc,
+          capUtil: y.capacityUtilization,
+        })),
+        unitEconomics: lastResult.unitEconomics,
+        params,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      navigator.clipboard.writeText(text).then(() => appendLog("Export copied to clipboard.", "success"));
+      return;
+    }
+    if (cmd === "finrep") {
+      const subCmd = rest[0];
+      const rawData = rest.slice(1).join(" ");
+      
+      if (!subCmd || !rawData) {
+        appendLog("Usage: finrep <income|balance|both> <data>", "error");
+        appendLog("Example: finrep income Revenue: $5M, COGS: $1.5M, OpEx: $2M", "info");
+        appendLog("Add --compliance=<level> for production use", "info");
+        return;
+      }
+      
+      // Check for compliance level flag
+      let complianceLevel: ComplianceLevel = "educational";
+      const complianceMatch = rawData.match(/--compliance=(\w+)/);
+      if (complianceMatch) {
+        const level = complianceMatch[1] as ComplianceLevel;
+        if (["educational", "internal_analysis", "client_deliverable", "regulatory_filing"].includes(level)) {
+          complianceLevel = level;
+        }
+      }
+      
+      try {
+        const parsedData = parseFinancialData(rawData.replace(/--compliance=\w+/, "").trim());
+        const validation = validateWithBenchmarks(parsedData);
+        
+        // Compliance validation
+        const complianceCheck = RegulatoryComplianceFramework.validateDataQualityForCompliance(
+          validation.dataQualityScore, 
+          complianceLevel
+        );
+        
+        if (!complianceCheck.acceptable) {
+          appendLog(`COMPLIANCE ERROR: Analysis blocked for ${complianceLevel} level`, "error");
+          complianceCheck.warnings.forEach(warning => appendLog(warning, "error"));
+          return;
+        }
+        
+        // Show compliance header for non-educational use
+        if (complianceLevel !== "educational") {
+          const complianceHeader = RegulatoryComplianceFramework.generateComplianceHeader(
+            complianceLevel, 
+            validation.dataQualityScore
+          );
+          complianceHeader.forEach(line => appendLog(line, "muted"));
+        }
+        
+        // Show validation results
+        appendLog(`Data Quality Score: ${validation.dataQualityScore}%`, validation.dataQualityScore >= 90 ? "success" : validation.dataQualityScore >= 70 ? "info" : "error");
+        
+        if (validation.errors.length > 0) {
+          appendLog("VALIDATION ERRORS:", "error");
+          validation.errors.forEach(error => appendLog(error, "error"));
+          return;
+        }
+        
+        if (validation.warnings.length > 0) {
+          appendLog("VALIDATION WARNINGS:", "muted");
+          validation.warnings.forEach(warning => appendLog(warning, "muted"));
+        }
+        
+        if (validation.suggestions.length > 0 && complianceLevel !== "educational") {
+          appendLog("SUGGESTIONS:", "info");
+          validation.suggestions.forEach(suggestion => appendLog(suggestion, "info"));
+        }
+        
+        const completed = completeFinancialData(parsedData);
+        
+        if (subCmd === "income" || subCmd === "both") {
+          appendLog("", "info");
+          generateIncomeStatement(completed.incomeStatement).forEach((line) => appendLog(line, "success"));
+        }
+        
+        if (subCmd === "balance" || subCmd === "both") {
+          if (subCmd === "both") appendLog("", "info");
+          generateBalanceSheet(completed.balanceSheet).forEach((line) => appendLog(line, "success"));
+        }
+        
+        if (subCmd !== "income" && subCmd !== "balance" && subCmd !== "both") {
+          appendLog("Unknown finrep command. Use: income, balance, or both", "error");
+        }
+        
+        // Add compliance warnings for higher levels
+        if (complianceLevel !== "educational") {
+          complianceCheck.warnings.forEach(warning => appendLog(warning, "muted"));
+        }
+        
+      } catch (error) {
+        appendLog("Error processing financial data. Check format.", "error");
+      }
+      return;
+    }
+    if (cmd === "audit") {
+      const subCmd = rest[0];
+      if (subCmd === "export") {
+        const report = auditTrail.exportComplianceReport();
+        navigator.clipboard.writeText(report).then(() => 
+          appendLog("Audit trail exported to clipboard.", "success"));
+      } else if (subCmd === "summary") {
+        appendLog(`Session ID: ${auditTrail.getSessionId()}`, "info");
+        appendLog(`Compliance Level: ${auditTrail.getComplianceLevel()}`, "info");
+        appendLog("Use 'audit export' to get full audit trail.", "info");
+      } else {
+        appendLog("Usage: audit <summary|export>", "error");
+      }
+      return;
+    }
+    if (cmd === "compliance") {
+      const level = rest[0] as ComplianceLevel;
+      if (!level) {
+        appendLog(`Current compliance level: ${complianceLevel}`, "info");
+        appendLog("Available levels: educational, internal_analysis, client_deliverable, regulatory_filing", "info");
+        return;
+      }
+      if (!["educational", "internal_analysis", "client_deliverable", "regulatory_filing"].includes(level)) {
+        appendLog("Invalid compliance level. Use: educational, internal_analysis, client_deliverable, regulatory_filing", "error");
+        return;
+      }
+      
+      // Check user permissions (in production, implement real auth)
+      if (!RegulatoryComplianceFramework.validateUserPermissions("demo_user", "set_compliance", level)) {
+        appendLog(`Access denied for compliance level: ${level}`, "error");
+        appendLog("Contact administrator for regulatory filing access.", "error");
+        return;
+      }
+      
+      setComplianceLevel(level);
+      auditTrail.setComplianceLevel(level);
+      appendLog(`Compliance level set to: ${level}`, "success");
+      
+      if (level !== "educational") {
+        const disclaimers = RegulatoryComplianceFramework.getRequiredDisclaimers(level);
+        appendLog("REGULATORY DISCLAIMERS APPLY:", "muted");
+        disclaimers.forEach(d => appendLog(`- ${d.type.toUpperCase()}`, "muted"));
+      }
+      return;
+    }
+    if (cmd === "location") {
+      const market = rest[0];
+      if (!market) {
+        appendLog(`Current location: ${selectedLocation}`, "info");
+        appendLog("Available markets:", "info");
+        Object.keys(LOCATION_DATABASE).forEach(key => {
+          const loc = LOCATION_DATABASE[key];
+          appendLog(`  ${key} - ${loc.market} (${loc.tier})`, "info");
+        });
+        return;
+      }
+      
+      if (!LOCATION_DATABASE[market]) {
+        appendLog(`Unknown market: ${market}`, "error");
+        appendLog("Use 'location' to see available markets", "error");
+        return;
+      }
+      
+      setSelectedLocation(market);
+      auditTrail.logAction("location_change", { newLocation: market, previousLocation: selectedLocation });
+      const loc = LOCATION_DATABASE[market];
+      appendLog(`Location set to: ${loc.market}`, "success");
+      appendLog(`Market Tier: ${loc.tier}, Median Income: ${fmtCurrency(loc.medianIncome)}`, "info");
+      appendLog(`Competition Index: ${loc.competitionIndex}, Multiple: ${loc.marketMultiplier.toFixed(2)}x`, "info");
+      return;
+    }
+    if (cmd === "enhanced" && rest[0] === "run") {
+      auditTrail.logAction("enhanced_dcf_run", {
+        location: selectedLocation,
+        baseRevenue: params.baseYearRevenueBreakdown.injectables + params.baseYearRevenueBreakdown.lasers + params.baseYearRevenueBreakdown.skincare,
+        enhancedMode: true
+      });
+      
+      // Calculate enhanced DCF with location and accuracy improvements
+      const baseResult = computeProjections(params);
+      const enhancedMultiple = getEnhancedMarketMultiple(
+        baseResult.exitEbitda,
+        baseResult.years[0].revenue.total,
+        params.growth.newPatients,
+        selectedLocation
+      );
+      
+      // Recalculate with enhanced multiple
+      const enhancedParams = { ...params };
+      enhancedParams.exit.exitMultipleEBITDA = enhancedMultiple;
+      const enhancedResult = computeProjections(enhancedParams);
+      
+      setLastResult(enhancedResult);
+      
+      appendLog("— Enhanced DCF Analysis —", "muted");
+      appendLog(`Location: ${LOCATION_DATABASE[selectedLocation].market}`, "info");
+      appendLog(`Enhanced Multiple: ${enhancedMultiple.toFixed(2)}x (vs. standard ${params.exit.exitMultipleEBITDA.toFixed(2)}x)`, "info");
+      appendLog("", "info");
+      
+      printSummary(enhancedResult);
+      
+      // Show enhancement impact
+      const impactPct = ((enhancedResult.enterpriseValue - baseResult.enterpriseValue) / baseResult.enterpriseValue) * 100;
+      appendLog("", "info");
+      appendLog("— Enhancement Impact —", "muted");
+      appendLog(`Standard Model: ${fmtCurrency(baseResult.enterpriseValue)}`, "info");
+      appendLog(`Enhanced Model: ${fmtCurrency(enhancedResult.enterpriseValue)}`, "success");
+      appendLog(`Impact: ${impactPct > 0 ? '+' : ''}${impactPct.toFixed(1)}% (${fmtCurrency(enhancedResult.enterpriseValue - baseResult.enterpriseValue)})`, impactPct > 0 ? "success" : "error");
+      
+      auditTrail.logAction("enhanced_dcf_complete", {
+        standardEV: baseResult.enterpriseValue,
+        enhancedEV: enhancedResult.enterpriseValue,
+        impactPercent: impactPct,
+        enhancedMultiple
+      });
+      
+      return;
+    }
+
+    appendLog("Unknown command. Type 'help' for available commands.", "error");
+  }
+
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const cmd = input.trim();
+    if (!cmd) return;
+    handleCommand(cmd);
+    setHistory((h) => [cmd, ...h].slice(0, 50));
+    setHistoryIdx(-1);
+    setInput("");
+  }
+
+  function onKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowUp") {
+      e.preventDefault();
+      const idx = Math.min(history.length - 1, historyIdx + 1);
+      if (idx >= 0) {
+        setHistoryIdx(idx);
+        setInput(history[idx] ?? "");
+      }
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      const idx = Math.max(-1, historyIdx - 1);
+      setHistoryIdx(idx);
+      setInput(idx === -1 ? "" : history[idx] ?? "");
+    }
+  }
+
+  const quickCommands = [
+    "help",
+    "run",
+    "show params",
+    "sens discount.wacc=8%,10%,12% exit.exitMultipleEBITDA=6,8,10",
+    "mc 500",
+    "preset growth",
+    "preset lean",
+    "preset premium",
+    "finrep income Revenue: $5M, COGS: $1.5M, OpEx: $2M",
+  ];
+
+  const keyMetrics = useMemo(() => {
+    const r = result;
+    const y1 = r.years[0];
+    const exit = r.years.find((y) => y.year === r.exitYear) || r.years[r.years.length - 1];
+    return [
+      { label: "Enterprise Value", value: fmtCurrencyCompact(r.enterpriseValue) },
+      { label: "EV / Exit EBITDA", value: (r.enterpriseValue / Math.max(1, exit.ebitda)).toFixed(2) + "x" },
+      { label: "Y1 EBITDA %", value: fmtPct(r.summary.ebitdaMarginY1) },
+      { label: "Capacity Util Y1", value: fmtPct(y1.capacityUtilization) },
+      { label: "LTV / CAC", value: r.unitEconomics.ltvToCac.toFixed(2) + "x" },
+      { label: "Payback", value: r.unitEconomics.paybackMonths.toFixed(1) + " mo" },
+    ];
+  }, [result]);
+
+  return (
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        <header className="mb-6">
+          <h1 className="text-2xl font-semibold text-slate-900">Medispa Valuation Terminal</h1>
+          <p className="text-sm text-slate-600 mt-1">World-class private equity-grade DCF, unit economics, sensitivity, and Monte Carlo in a beautiful CLI interface.</p>
+        </header>
+
+        <section className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+          {keyMetrics.map((m) => (
+            <div key={m.label} className="bg-white rounded-lg shadow p-4 border border-slate-200">
+              <div className="text-slate-500 text-xs">{m.label}</div>
+              <div className="text-slate-900 text-lg font-semibold mt-1">{m.value}</div>
+            </div>
+          ))}
+        </section>
+
+        <section className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2">
+            <div className="bg-slate-900 rounded-lg shadow border border-slate-800">
+              <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                <div className="text-emerald-300 font-mono text-sm">valuation@medispa:~$</div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className="px-3 py-1.5 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700"
+                    onClick={() => handleCommand("run")}
+                  >Run</button>
+                  <button
+                    className="px-3 py-1.5 text-xs rounded bg-slate-700 text-white hover:bg-slate-600"
+                    onClick={() => setLogs([{ text: "Medispa Valuation Terminal — type 'help' to get started.", tone: "muted" }])}
+                  >Clear</button>
+                </div>
+              </div>
+              <div ref={termRef} className="px-4 py-3 h-96 overflow-y-auto font-mono text-sm text-emerald-300">
+                {logs.map((l, i) => (
+                  <div key={i} className={l.tone === "error" ? "text-rose-300" : l.tone === "success" ? "text-emerald-300" : l.tone === "muted" ? "text-slate-400" : "text-emerald-200"}>
+                    {l.text}
+                  </div>
+                ))}
+              </div>
+              <form onSubmit={onSubmit} className="px-4 py-3 border-t border-slate-800 flex items-center gap-2">
+                <span className="text-emerald-400 font-mono">&gt;</span>
+                <input
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  className="flex-1 bg-transparent outline-none text-emerald-200 placeholder-slate-500 font-mono text-sm"
+                  placeholder="Type a command, e.g., run | help | set discount.wacc 10%"
+                />
+                <button type="submit" className="px-3 py-1.5 text-xs rounded bg-emerald-600 text-white hover:bg-emerald-700">Execute</button>
+              </form>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {quickCommands.map((q) => (
+                <button
+                  key={q}
+                  onClick={() => setInput(q)}
+                  className="px-3 py-1.5 rounded bg-white border border-slate-200 shadow text-slate-700 hover:bg-slate-50 text-xs"
+                >{q}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="lg:col-span-1">
+            <div className="bg-white rounded-lg shadow p-4 border border-slate-200">
+              <h2 className="text-sm font-semibold text-slate-700">Key Inputs</h2>
+              <div className="mt-3 space-y-2 text-sm">
+                <InlineParam label="WACC" value={params.discount.wacc} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, discount: { wacc: v } }))} />
+                <InlineParam label="Exit Multiple" value={params.exit.exitMultipleEBITDA} fmt={(v) => v.toFixed(1) + "x"} onChange={(v) => setParams((p) => ({ ...p, exit: { ...p.exit, exitMultipleEBITDA: v } }))} />
+                <InlineParam label="Exit Year" value={params.exit.exitYear} fmt={(v) => String(v)} onChange={(v) => setParams((p) => ({ ...p, exit: { ...p.exit, exitYear: Math.round(clamp(v, 1, 10)) } }))} />
+                <InlineParam label="New Patients YoY" value={params.growth.newPatients} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, growth: { ...p.growth, newPatients: v } }))} />
+                <InlineParam label="Churn" value={params.patients.churnRate} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, patients: { ...p.patients, churnRate: v } }))} />
+                <InlineParam label="Utilization" value={params.volume.utilizationRate} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, volume: { ...p.volume, utilizationRate: v } }))} />
+                <InlineParam label="Provider Comp" value={params.opex.providerCompPctRevenue} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, opex: { ...p.opex, providerCompPctRevenue: v } }))} />
+                <InlineParam label="Marketing % Rev" value={params.opex.marketingPctRevenue} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, opex: { ...p.opex, marketingPctRevenue: v } }))} />
+                <InlineParam label="Maintenance Capex % Rev" value={params.capex.maintenancePctRevenue} fmt={fmtPct} onChange={(v) => setParams((p) => ({ ...p, capex: { ...p.capex, maintenancePctRevenue: v } }))} />
+              </div>
+            </div>
+
+            <div className="bg-white rounded-lg shadow p-4 border border-slate-200 mt-4">
+              <h2 className="text-sm font-semibold text-slate-700">Quick Tweaks</h2>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                <button className="px-2 py-2 rounded bg-slate-100 hover:bg-slate-200" onClick={() => handleCommand("set discount.wacc 10%")}>WACC 10%</button>
+                <button className="px-2 py-2 rounded bg-slate-100 hover:bg-slate-200" onClick={() => handleCommand("set exit.exitMultipleEBITDA 10x")}>Exit 10x</button>
+                <button className="px-2 py-2 rounded bg-slate-100 hover:bg-slate-200" onClick={() => handleCommand("set patients.cac $450")}>CAC $450</button>
+                <button className="px-2 py-2 rounded bg-slate-100 hover:bg-slate-200" onClick={() => handleCommand("set growth.priceInflation 4%")}>Inflation 4%</button>
+                <button className="px-2 py-2 rounded bg-slate-100 hover:bg-slate-200" onClick={() => handleCommand("preset growth")}>Preset Growth</button>
+                <button className="px-2 py-2 rounded bg-slate-100 hover:bg-slate-200" onClick={() => handleCommand("preset lean")}>Preset Lean</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <footer className="mt-8 text-xs text-slate-500">
+          For professional use; model is illustrative and configurable. Use commands to tailor assumptions and save scenarios.
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+function InlineParam({ label, value, fmt, onChange }: { label: string; value: number; fmt: (v: number) => string; onChange: (v: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState("");
+  useEffect(() => { if (!editing) setDraft(""); }, [editing]);
+  return (
+    <div className="flex items-center justify-between">
+      <div className="text-slate-600">{label}</div>
+      {!editing ? (
+        <button className="text-slate-900 font-medium" onClick={() => setEditing(true)}>{fmt(value)}</button>
+      ) : (
+        <form
+          onSubmit={(e) => { e.preventDefault(); const v = parseNumericInput(draft); if (v !== null) onChange(v); setEditing(false); }}
+          className="flex items-center gap-2"
+        >
+          <input autoFocus value={draft} onChange={(e) => setDraft(e.target.value)} placeholder={String(value)} className="px-2 py-1 border border-slate-300 rounded text-slate-900 w-32" />
+          <button className="px-2 py-1 bg-emerald-600 text-white rounded">OK</button>
+          <button type="button" onClick={() => setEditing(false)} className="px-2 py-1 bg-slate-200 text-slate-700 rounded">Cancel</button>
+        </form>
+      )}
+    </div>
+  );
+}
